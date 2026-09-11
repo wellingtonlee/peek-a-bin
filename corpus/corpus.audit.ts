@@ -63,7 +63,7 @@ const ccResults = new Map<BinKey, CcResult>();
 const ozResults = new Map<BinKey, OffsetofResult>();
 const arResults = new Map<BinKey, ArityResult>();
 const ucResults = new Map<BinKey, UndefinedCalleeResult>();
-/** The prelude's inventions, classified. Report-only in this session (peek-a-bin-n9cl.1). */
+/** The prelude's inventions, classified. `register + minted` GATES at 0 (peek-a-bin-n9cl.4). */
 const udResults = new Map<BinKey, UndeclaredResult>();
 const ulResults = new Map<BinKey, UnliftedResult>();
 const dbResults = new Map<BinKey, DuplicateBodiesResult>();
@@ -1275,13 +1275,33 @@ if (!pre.haveBins || !pre.haveCc) {
     // report the moment it stops looking.
 
     /**
-     * The prelude's inventions. `compiled` must equal `ccSyntaxCheck`'s, or the
-     * two gcc passes have drifted onto different populations; `api +
-     * unknownTypes > 0` says the prelude is still doing the work it exists for,
-     * which is what separates "nothing undeclared" from "gcc reported nothing".
-     * `register + minted` is REPORTED — the register-variables child gates it.
+     * A GATE at 0 on `register + minted` (peek-a-bin-n9cl.4), the k8i figure.
+     *
+     * Every row is an identifier the emitted C USES AND NEVER DECLARES — a
+     * register name, a split-repair `ecx_3`, a `clobbered_rcx_2` — and the only
+     * reason the `cc` row above reads 100% clean is that `preludeFor` invents a
+     * `long` per name. With one variable per name, `dx` and `edx` were two C
+     * variables for one machine register, and t64's `wcslen` tested a name
+     * nothing assigned (peek-a-bin-uxm): compilable C stating a different
+     * program, which is `polarity inverted`'s character and why this gates.
+     * `emit.ts`'s `registerVariables` declares one variable per canonical
+     * register per function and spells every alias through it; the measured
+     * figure went 1452/2438/2260/1409 → 0/0/0/0 on t32/t64/w64/w32, and the
+     * negative control (skip the declaration loop) returns it there.
+     *
+     * THREE LIVENESS HALVES, and the second needs its reasoning kept. `compiled`
+     * must equal `ccSyntaxCheck`'s, or the two gcc passes have drifted onto
+     * different populations. `api + unknownTypes > 0` says gcc's diagnostics
+     * are still being read at all — the prelude is still doing the work it
+     * exists for — which is what separates "nothing undeclared" from "gcc
+     * reported nothing": NOTE that `api` is 0 on every binary today, so this
+     * assertion holds through the `unknown type name` inventions (the handle
+     * typedef, 21/279/276/20 pairs), and a change that declared those types
+     * would need a new liveness half here rather than a weaker one. `residue`
+     * is the class the emitter refuses to declare (`RESIDUE_NAME`), reported so
+     * the gate cannot be read as "every name is declared".
      */
-    it("classifies what the prelude declares (instrument liveness, not a gate)", () => {
+    it("declares every register and every minted variable the emitted C names", () => {
       for (const [key, ud] of udResults) {
         const cc = ccResults.get(key) as CcResult;
         expect(`${key}: compiled=${ud.compiled} cc=${cc.compiled}`).toBe(
@@ -1289,7 +1309,17 @@ if (!pre.haveBins || !pre.haveCc) {
         );
         expect(ud.unparseable).toBe(0);
         expect(ud.api + ud.unknownTypes).toBeGreaterThan(0);
-        expect(ud.rows.length).toBe(ud.register + ud.minted + ud.api + ud.other);
+        expect(ud.rows.length).toBe(ud.register + ud.minted + ud.residue + ud.api + ud.other);
+        // THE GATE. Named per row first, so a red run says which function and
+        // which name rather than "expected 3 to be 0".
+        expect(
+          `${key} undeclared: ${ud.rows
+            .filter((x) => x.cls === "register" || x.cls === "minted")
+            .slice(0, 8)
+            .map((x) => `${x.fn}@0x${x.addr.toString(16)} ${x.name} (${x.cls})`)
+            .join("; ")}`,
+        ).toBe(`${key} undeclared: `);
+        expect(ud.register + ud.minted).toBe(0);
       }
     });
 
@@ -1965,24 +1995,33 @@ function renderReport(): string {
         "    Sites in undefinedcallees_<bin>.jsonl. See undefinedCallees.ts (peek-a-bin-pf5g).",
       );
     }
-    // ── The readability instruments of peek-a-bin-n9cl.1 — ALL report-only. ──
+    // ── The readability instruments of peek-a-bin-n9cl.1. Report-only, except
+    // the undeclared-identifier row, which peek-a-bin-n9cl.4 turned into a gate. ──
     const ud = udResults.get(r.key);
     if (ud !== undefined) {
       L.push(
-        `  undeclared identifiers      ${ud.register} register, ${ud.minted} minted, ` +
-          `${ud.api} api, ${ud.other} other (function,name) pairs over ${ud.funcsAffected} of ` +
-          `${ud.compiled} functions; distinct ${ud.distinctRegister}/${ud.distinctMinted}/` +
-          `${ud.distinctApi}/${ud.distinctOther}; ${ud.unknownTypes} unknown type names ` +
-          `(${ud.distinctUnknownTypes} distinct) — REPORT-ONLY` +
+        `  undeclared identifiers      ${ud.register} register, ${ud.minted} minted — ` +
+          `register + minted GATED at 0; ${ud.residue} residue, ${ud.api} api, ${ud.other} other ` +
+          `(function,name) pairs over ${ud.funcsAffected} of ${ud.compiled} functions; distinct ` +
+          `${ud.distinctRegister}/${ud.distinctMinted}/${ud.distinctResidue}/${ud.distinctApi}/` +
+          `${ud.distinctOther}; ${ud.unknownTypes} unknown type names ` +
+          `(${ud.distinctUnknownTypes} distinct)` +
           (ud.otherNames.length > 0 ? `\n    other: ${ud.otherNames.join(", ")}` : ""),
       );
-      L.push("    What `preludeFor` invents so that gcc reads clean: every `long rax;` is a");
-      L.push("    variable the emitted C USES AND NEVER DECLARES, so the 100% row above measures");
-      L.push("    the harness's completion of the output. Compiled ONCE with no prelude and");
-      L.push("    classified. `register + minted` is the figure peek-a-bin-k8i counted by hand");
-      L.push("    (1460/2456/2278/1417) and becomes a GATE at 0 in the register-variables child;");
-      L.push("    `api + unknown type names` is the liveness half — the prelude still doing the");
-      L.push("    work it exists for. Pairs in undeclared_<bin>.jsonl.");
+      L.push(
+        "    What `preludeFor` invents so that gcc reads clean. Compiled ONCE with no prelude",
+      );
+      L.push(
+        "    and classified. `register + minted` is the figure peek-a-bin-k8i counted by hand",
+      );
+      L.push(
+        "    (1460/2456/2278/1417 at 2328657) and is 0 since emit.ts declares one variable per",
+      );
+      L.push(
+        "    canonical register per function (peek-a-bin-n9cl.4); `residue` is what it refuses",
+      );
+      L.push("    to declare (stk_ slots, tmp_xchg, st0, xmm) and is reported, not gated. `api +");
+      L.push("    unknown type names` is the liveness half. Pairs in undeclared_<bin>.jsonl.");
     }
     const ul = ulResults.get(r.key);
     if (ul !== undefined) {

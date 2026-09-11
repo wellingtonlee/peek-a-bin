@@ -385,6 +385,17 @@ export interface IRFunction {
   params: IRParam[];
   locals: IRLocal[];
   body: IRStmt[];
+  /**
+   * Whether the image is PE32+ (x64), set by `promoteVars` from the pipeline's
+   * own `is64` and read by `emitFunction` to cap the width a register variable
+   * may be declared at — `regAtSize(canon, 4)` on a 32-bit image, so
+   * `int64_t rcx;` can never appear in a function whose instruction set has no
+   * RCX. Deliberately NOT inferred from the body the way `ssadestroy.ts`'s
+   * `registerSpeller` infers its own (`peek-a-bin-0s6e`'s `rcx_18 = rcx` is a
+   * canonical name leaking INTO a 32-bit body, and a cap inferred from that body
+   * would read the leak as evidence of a 64-bit image).
+   */
+  is64: boolean;
   typedefs?: import("./structs").StructDef[];
 }
 

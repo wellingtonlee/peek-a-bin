@@ -15,6 +15,8 @@ function fn(body: IRStmt[], extra: Partial<IRFunction> = {}): IRFunction {
     params: [],
     locals: [],
     body,
+    // The tests below are written in x64 names; a 32-bit function opts out.
+    is64: true,
     ...extra,
   };
 }
@@ -456,20 +458,18 @@ describe("emitFunction — spoiled-compare captures are declared", () => {
   });
 
   /**
-   * THE SCOPE, and its negative control. `ssadestroy.ts`'s `splitStaleReads`
-   * parks a pre-clobber value in an `IRVar` too — 2114 undeclared
-   * (function, name) pairs over the four corpus binaries against the captures'
-   * 114 — and those are spelled as registers deliberately, which the documented
-   * decision to leave a register undeclared covers. Declaring them is a much
-   * larger change with an emitted-C effect of its own (a pointer-typed one would
-   * flip `emitsAsPointer` and rescale the arithmetic around it), so the rule
-   * asks `isCapturedOperandName` and nothing broader.
+   * THE SCOPE. `ssadestroy.ts`'s `splitStaleReads` parks a pre-clobber value in
+   * an `IRVar` too (`ecx_3`), and those are NOT this pass's: they are declared
+   * by the register/variable pass (`registerVariables` and the `_varDecls`
+   * loop in `emitFunction`, peek-a-bin-n9cl.4), which runs after this one and
+   * excludes what this one declared. This pass asks `isCapturedOperandName` and
+   * nothing broader, so the two cannot declare one name twice.
    */
-  it("leaves a register-shaped repair variable undeclared", () => {
+  it("leaves a register-shaped repair variable to the variable pass", () => {
     const code = emitFunction(
       fn([capture("ecx_3", 4, irReg("ecx", 4)), { kind: "return", value: irVar("ecx_3", 4) }]),
     ).code;
-    expect(code).not.toMatch(/\bint32_t ecx_3;/);
+    expect(code.match(/^\s+int32_t ecx_3;$/gm)).toHaveLength(1);
     expect(code).toContain("ecx_3 = ecx;");
   });
 
@@ -844,5 +844,294 @@ describe("emitFunction — admissions name the lines that carry them", () => {
   it("is three empty arrays for a body with nothing to admit", () => {
     const r = emitFunction(fn([{ kind: "return", value: irConst(1, 4) }]));
     expect(r.admissions).toEqual({ unrecovered: [], unlifted: [], gotos: [] });
+  });
+});
+
+/**
+ * ONE C VARIABLE PER CANONICAL REGISTER PER FUNCTION (peek-a-bin-n9cl.4).
+ *
+ * Registers used to reach the page undeclared, one free variable per NAME, so
+ * `dx` and `edx` were two unrelated C variables for one machine register and
+ * t64's `wcslen` tested a name nothing assigned (peek-a-bin-uxm). 979 of 1072
+ * corpus functions carried the class at `2328657`; `cc` read clean only because
+ * `corpus/emitAudits.ts`'s `preludeFor` invented a `long` per name. The rule
+ * now: `registerVariables` declares one variable per canonical register at the
+ * widest alias the body mentions, capped at the image width, and every read
+ * and write is spelled through it — a narrow read as a cast, a narrow write as
+ * a zero-extension (32-bit on x64) or a mask-merge (8/16-bit), with the
+ * truncation IN the expression.
+ */
+describe("emitFunction — register variables are declared at the widest width and every alias is spelled through them", () => {
+  const assign = (dest: IRExpr, src: IRExpr): IRStmt => ({ kind: "assign", dest, src });
+  const ret = (value: IRExpr): IRStmt => ({ kind: "return", value });
+  /** The declaration block: the lines between the header and the first blank line. */
+  const decls = (code: string): string[] => {
+    const lines = code.split("\n");
+    const start = lines.findIndex((l) => l.endsWith(") {")) + 1;
+    const end = lines.indexOf("", start);
+    return end < 0 ? [] : lines.slice(start, end).map((l) => l.trim());
+  };
+
+  it("declares dx and edx as ONE variable and spells the narrow read through it", () => {
+    // t64's wcslen shape at the IR level: EDX assigned, DX tested.
+    const code = emitFunction(
+      fn([
+        assign(irReg("edx", 4), irConst(7, 4)),
+        {
+          kind: "while",
+          condition: irBinary("!=", irReg("dx", 2), irConst(0, 4)),
+          body: [assign(irReg("edx", 4), irBinary("-", irReg("edx", 4), irConst(1, 4)))],
+        },
+      ]),
+    ).code;
+    expect(decls(code)).toEqual(["int32_t edx;"]);
+    expect(code).toContain("while ((uint16_t)edx != 0)");
+    expect(code).not.toMatch(/\bdx\b/);
+  });
+
+  it("merges an 8-bit write into the wider variable with the truncation in the expression", () => {
+    const code = emitFunction(
+      fn([assign(irReg("al", 1), irReg("ecx", 4)), ret(irReg("eax", 4))], { is64: false }),
+    ).code;
+    expect(decls(code)).toEqual(["int32_t eax;", "int32_t ecx;"]);
+    expect(code).toContain("    eax = (eax & ~0xFF) | (uint8_t)ecx;");
+    expect(code).toContain("return eax;");
+  });
+
+  it("merges a 16-bit write with the 16-bit mask", () => {
+    const code = emitFunction(
+      fn([assign(irReg("ax", 2), irConst(0x1234, 4)), ret(irReg("eax", 4))], { is64: false }),
+    ).code;
+    expect(code).toContain("    eax = (eax & ~0xFFFF) | 0x1234;");
+  });
+
+  it("spells a high-byte read and write through the containing variable", () => {
+    const code = emitFunction(
+      fn([assign(irReg("ah", 1), irReg("cl", 1)), ret(irReg("ah", 1))], { is64: false }),
+    ).code;
+    // Only AH and CL are mentioned of their registers, and AH alone keeps its
+    // own name — there is nothing wider to spell it through.
+    expect(decls(code)).toEqual(["uint8_t ah;", "uint8_t cl;"]);
+    expect(code).toContain("ah = cl;");
+
+    const wide = emitFunction(
+      fn([assign(irReg("ah", 1), irReg("cl", 1)), ret(irReg("eax", 4))], { is64: false }),
+    ).code;
+    expect(decls(wide)).toEqual(["uint8_t cl;", "int32_t eax;"]);
+    expect(wide).toContain("    eax = (eax & ~0xFF00) | ((uint8_t)cl << 8);");
+    const read = emitFunction(
+      fn([assign(irReg("ecx", 4), irReg("ah", 1)), ret(irReg("eax", 4))], { is64: false }),
+    ).code;
+    expect(read).toContain("ecx = (uint8_t)(eax >> 8);");
+  });
+
+  it("forces a register mentioned as both AH and AL up to its 16-bit alias", () => {
+    // `(uint8_t)(al >> 8)` would name bits AL does not have; the smallest
+    // variable that holds both bytes is AX.
+    const code = emitFunction(
+      fn([ret(irBinary("==", irReg("ah", 1), irReg("al", 1)))], { is64: false }),
+    ).code;
+    expect(decls(code)).toEqual(["uint16_t ax;"]);
+    expect(code).toContain("return (uint8_t)(ax >> 8) == (uint8_t)ax;");
+  });
+
+  it("zero-extends a 32-bit write on x64", () => {
+    const code = emitFunction(
+      fn([assign(irReg("eax", 4), irReg("ebx", 4)), ret(irReg("rax", 8))]),
+    ).code;
+    // EBX is the only mention of RBX, so it is the variable and needs no cast;
+    // EAX is a sub-register of the declared RAX, so the write says what
+    // happens to bits 63:32 (Intel SDM vol. 1 §3.4.1.1).
+    expect(decls(code)).toEqual(["int32_t ebx;", "int64_t rax;"]);
+    expect(code).toContain("    rax = (uint32_t)ebx;");
+    expect(code).toContain("return rax;");
+  });
+
+  it("does not cast a constant that already fits the written width", () => {
+    const code = emitFunction(
+      fn([assign(irReg("eax", 4), irConst(0, 4)), ret(irReg("rax", 8))]),
+    ).code;
+    expect(code).toContain("    rax = 0;");
+    expect(code).not.toContain("(uint32_t)0");
+  });
+
+  it("does not double a cast a narrow read already carries", () => {
+    const code = emitFunction(
+      fn([
+        assign(irReg("eax", 4), irReg("ecx", 4)),
+        ret(irBinary("+", irReg("rax", 8), irReg("rcx", 8))),
+      ]),
+    ).code;
+    // ECX is a sub-register of the declared RCX, so its read is `(uint32_t)rcx`
+    // and the write to EAX takes that text as its truncation.
+    expect(code).toContain("    rax = (uint32_t)rcx;");
+    expect(code).not.toContain("(uint32_t)(uint32_t)");
+  });
+
+  it("uses no compound spelling for a narrow write", () => {
+    const code = emitFunction(
+      fn([
+        assign(irReg("eax", 4), irBinary("+", irReg("eax", 4), irConst(1, 4))),
+        ret(irReg("rax", 8)),
+      ]),
+    ).code;
+    expect(code).toContain("    rax = (uint32_t)((uint32_t)rax + 1);");
+    expect(code).not.toContain("++");
+  });
+
+  /**
+   * THE PE32 CAP, and the reason it is not "widest mentioned" alone. A 64-bit
+   * name in a 32-bit function is a canonical name leaking in (the
+   * `unencodableNames` corpus gate's class) — the variable is capped at 32 bits
+   * and the leaked read is left exactly as written, UNDECLARED, so both that
+   * gate and the undeclared-identifier gate see it. Spelling it through `ecx`
+   * would hide the leak from both.
+   */
+  it("never declares a 64-bit register in a 32-bit function, and leaves a leaked name visible", () => {
+    const code = emitFunction(
+      fn([assign(irReg("ecx", 4), irConst(1, 4)), ret(irReg("rcx", 8))], { is64: false }),
+    ).code;
+    expect(decls(code)).toEqual(["int32_t ecx;"]);
+    expect(code).not.toContain("int64_t");
+    expect(code).toContain("return rcx;");
+  });
+
+  it("caps a function that mentions only the 64-bit name at the 32-bit alias", () => {
+    const code = emitFunction(fn([ret(irReg("rcx", 8))], { is64: false })).code;
+    expect(decls(code)).toEqual(["int32_t ecx;"]);
+    expect(code).toContain("return rcx;");
+  });
+
+  it("declares a clobbered value uninitialised, and never assigns it", () => {
+    const code = emitFunction(
+      fn([ret(irBinary("+", irReg("rax", 8), irVar("clobbered_rcx_2", 8)))]),
+    ).code;
+    // Registers first, then the minted variables, each group sorted by name.
+    expect(decls(code)).toEqual(["int64_t rax;", "int64_t clobbered_rcx_2;"]);
+    expect(code).not.toMatch(/clobbered_rcx_2\s*=[^=]/);
+  });
+
+  it("declares a split-repair variable at the width it carries", () => {
+    const code = emitFunction(
+      fn([assign(irVar("ecx_3", 4), irReg("ecx", 4)), ret(irVar("ecx_3", 4))]),
+    ).code;
+    expect(decls(code)).toEqual(["int32_t ecx;", "int32_t ecx_3;"]);
+  });
+
+  it("declares a register a printed call result lands in, and not one whose result is dead", () => {
+    const call: IRCall = { kind: "call", target: "sub_408000", args: [] };
+    const printed = emitFunction(
+      fn([
+        { kind: "call_stmt", call, resultDest: irReg("rax", 8), addr: 0x1000 },
+        { kind: "store", address: irReg("rcx", 8), value: irReg("rax", 8), size: 8, addr: 0x1004 },
+        { kind: "return" },
+      ]),
+    ).code;
+    expect(decls(printed)).toEqual(["int64_t rax;", "int64_t rcx;"]);
+    const dead = emitFunction(
+      fn([
+        { kind: "call_stmt", call, resultDest: irReg("rax", 8), addr: 0x1000 },
+        { kind: "return" },
+      ]),
+    ).code;
+    expect(decls(dead)).toEqual([]);
+  });
+
+  /**
+   * THE ONE MENTION THAT IS NOT AN `IRReg`. An indirect call carries its
+   * register as the TEXT `(*esi)` in `IRCall.target`, and every undeclared
+   * register left after the first corpus run of this rule was that shape —
+   * 16/4/4/16 (function, name) pairs on t32/t64/w64/w32. The target is a read
+   * like any other: declared, and spelled through the variable.
+   */
+  it("declares and spells the register an indirect call goes through", () => {
+    const viaEsi: IRCall = { kind: "call", target: "(*esi)", args: [irReg("ebx", 4)] };
+    const code = emitFunction(
+      fn(
+        [
+          { kind: "call_stmt", call: viaEsi, resultDest: irReg("eax", 4), addr: 0x1000 },
+          ret(irReg("eax", 4)),
+        ],
+        {
+          is64: false,
+        },
+      ),
+    ).code;
+    // `eax = f(); return eax;` folds to `return f();`, so EAX is not mentioned.
+    expect(decls(code)).toEqual(["int32_t ebx;", "int32_t esi;"]);
+    expect(code).toContain("return ((intptr_t (*)())esi)(ebx);");
+
+    // A sub-register target in a function that names the wider alias is spelled
+    // through it, exactly as an operand read would be.
+    const viaEcx: IRCall = { kind: "call", target: "(*ecx)", args: [] };
+    const wide = emitFunction(
+      fn([{ kind: "call_stmt", call: viaEcx, addr: 0x1000 }, ret(irReg("rcx", 8))]),
+    ).code;
+    expect(decls(wide)).toEqual(["int64_t rcx;"]);
+    expect(wide).toContain("((intptr_t (*)())(uint32_t)rcx)();");
+  });
+
+  /**
+   * THE RESIDUE. Names the emitter cannot declare honestly: a register
+   * `isKnownRegister` refuses (`tmp_xchg`, a `stk_<addr>` slot) or one whose
+   * width has no C integer (`st0` at 10 bytes, `xmm0` at 16). They print as
+   * written, and `corpus/emitAudits.ts` counts them as `residue` beside the
+   * gated `register + minted`.
+   */
+  it("declares none of the residue class", () => {
+    const code = emitFunction(
+      fn(
+        [
+          assign(irReg("st0", 10), irReg("xmm0", 16)),
+          assign(irReg("tmp_xchg", 4), irReg("stk_401000", 4)),
+          ret(irConst(0, 4)),
+        ],
+        { is64: false },
+      ),
+    ).code;
+    expect(decls(code)).toEqual([]);
+    expect(code).toContain("st0 = xmm0;");
+    expect(code).toContain("tmp_xchg = stk_401000;");
+  });
+
+  /**
+   * The `inferTypes → emit` register channel had no reader while registers were
+   * undeclared. It is adopted only when it names the SAME width — the
+   * `capturedOperandType` rule — so a `HANDLE`, a `PVOID` or a `struct_1*`
+   * never reaches a register declaration (see `structPointer`).
+   */
+  it("adopts an inferred type when its width is the register's, and refuses otherwise", () => {
+    const agree = {
+      types: new Map([["rax", { kind: "int", size: 8, signed: false }]]),
+    } as unknown as TypeContext;
+    expect(decls(emitFunction(fn([ret(irReg("rax", 8))]), agree).code)).toEqual(["uint64_t rax;"]);
+
+    const disagree = {
+      types: new Map([["rax", { kind: "int", size: 4, signed: false }]]),
+    } as unknown as TypeContext;
+    expect(decls(emitFunction(fn([ret(irReg("rax", 8))]), disagree).code)).toEqual([
+      "int64_t rax;",
+    ]);
+
+    const handle = typeCtxWith("rax", "handle");
+    expect(decls(emitFunction(fn([ret(irReg("rax", 8))]), handle).code)).toEqual(["int64_t rax;"]);
+  });
+
+  it("keeps the register declarations beside the locals, ahead of the captures and unrecovered values", () => {
+    const code = emitFunction(
+      fn(
+        [
+          assign(irVar("flg_401000_0", 4), irReg("eax", 4)),
+          ret(irBinary("+", irVar("flg_401000_0", 4), irUnknown("lost"))),
+        ],
+        { locals: [{ name: "var_8", type: "int32_t" }], is64: false },
+      ),
+    ).code;
+    expect(decls(code).map((d) => d.split(" ")[1].replace(";", ""))).toEqual([
+      "var_8",
+      "eax",
+      "flg_401000_0",
+      "__unrecovered_1",
+    ]);
   });
 });

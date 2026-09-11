@@ -6,6 +6,7 @@ import {
   bodiesOf,
   canonReg,
   isKnownRegister,
+  regAtSize,
   regSize,
   rewriteBodies,
   walkExpr,
@@ -323,8 +324,10 @@ let _usedEnums: Map<string, EnumType> = new Map();
 let _enumTypesNeeded: Set<string> = new Set();
 /** Name → declared type, for every parameter and local in the function header. */
 let _declaredVarTypes: Map<string, string> = new Map();
-/** Register names the function assigns, lowercased — see `registerText`. */
-let _assignedRegs: Set<string> = new Set();
+/** Canonical register → the ONE C variable this function declares for it — see `registerText`. */
+let _regVars: Map<string, RegVar> = new Map();
+/** Name → declared type, for every IRVar the body mentions that nothing else declares. */
+let _varDecls: Map<string, string> = new Map();
 /** Call statements whose result register is read — see `collectCapturedCalls`. */
 let _capturedCalls: ReadonlySet<IRStmt> = new Set();
 /** Spoiled-compare captures the body assigns → the type they are declared with. */
@@ -398,9 +401,10 @@ function fieldDeclaredType(expr: IRExpr & { kind: "field_access" }): string | nu
  * Whether the emitted C gives this expression a pointer type.
  *
  * Only things the emitted C *declares* have a type at all: struct members, and
- * the parameters and locals in the function header. A register is deliberately
- * left undeclared (see `structPointer`), so nothing the reader supplies for it
- * can make C scale arithmetic on it, and it answers false here.
+ * the parameters and locals in the function header. A register is declared as
+ * an INTEGER of its width and never as a pointer (see `structPointer` and
+ * `registerVariables`), so C cannot scale arithmetic on it, and it answers
+ * false here.
  */
 function emitsAsPointer(expr: IRExpr): boolean {
   switch (expr.kind) {
@@ -661,7 +665,7 @@ function annotateIOCTLArg(arg: IRExpr, emitted: string): string {
  * missing.
  *
  * The obvious repair — declare `struct_N *rcx;` at the top of the function — is
- * the wrong one, and quietly so. A register is not a variable: the same `rax`
+ * the wrong one, and quietly so. A register is not an object: the same `rax`
  * that holds a `struct_1 *` on one line is a plain integer on the next, and the
  * emitter writes byte offsets off it as `*(int32_t*)(rax + 0xC8)`. Declaring it
  * a struct pointer makes C scale that offset by `sizeof(struct_1)`, so the line
@@ -669,7 +673,9 @@ function annotateIOCTLArg(arg: IRExpr, emitted: string): string {
  * that use a register as a struct pointer across the three distlib binaries do
  * exactly this. A per-function declaration also cannot express a scratch
  * register that carries two different objects, which is what scratch registers
- * are for.
+ * are for. Registers ARE declared since `peek-a-bin-n9cl.4` — but as integers of
+ * their width (`registerVariables`), which is exactly the declaration that
+ * cannot scale anything, so this reasoning is unchanged by it.
  *
  * A cast at the point of use makes the narrower claim that is the one the
  * recovery actually supports — *this access* reads this address as a
@@ -769,11 +775,34 @@ function namedGlobalAt(address: IRExpr, size: number): string | null {
  * can be turned into an indirect one by a name this misjudges.
  */
 function calleeText(name: string): string {
-  const indirect = /^\(\*\s*(.*)\)$/.exec(name) ?? /^\*\s*(.*)$/.exec(name);
-  if (!indirect) return name;
-  const target = indirect[1].trim();
-  const value = /^[A-Za-z_]\w*$/.test(target) ? target : unrecoveredValue(target);
+  const target = indirectCallTarget(name);
+  if (target === null) return name;
+  let value: string;
+  if (!/^[A-Za-z_]\w*$/.test(target)) value = unrecoveredValue(target);
+  // A register held as TEXT in the call target is a read of that register
+  // like any other, and is spelled through the variable declared for it —
+  // it was the one mention `collectDeclarations` could not see as an `IRReg`,
+  // and every leftover undeclared name at `2328657` + n9cl.4 was this shape
+  // (16/4/4/16 on t32/t64/w64/w32).
+  else if (isKnownRegister(target))
+    value = registerText({ kind: "reg", name: target, size: regSize(target) }, false);
+  else value = target;
   return `((intptr_t (*)())${value})`;
+}
+
+/**
+ * The text inside an indirect call target — `(*esi)` → `esi`, `*esi` → `esi` —
+ * or null for a direct callee. ONE parse, shared by `calleeText` (which spells
+ * it) and `collectDeclarations` (which declares the register it names).
+ */
+function indirectCallTarget(name: string): string | null {
+  const indirect = /^\(\*\s*(.*)\)$/.exec(name) ?? /^\*\s*(.*)$/.exec(name);
+  return indirect ? indirect[1].trim() : null;
+}
+
+/** The callee name a call is emitted under: the import's own name where one is known. */
+function calleeName(call: IRExpr & { kind: "call" }): string {
+  return call.display?.split("!")?.pop() ?? call.target;
 }
 
 /** The signed `<stdint.h>` spelling of a machine operand width, where C has one. */
@@ -787,30 +816,59 @@ const SIGNED_TYPE: Record<number, string> = {
 /**
  * The high-byte registers, which are not the low bits of anything.
  *
- * `(uint8_t)eax` is AL. AH is bits 8..15, so the narrowing below would name the
- * wrong byte and is not attempted for these four.
+ * `(uint8_t)eax` is AL. AH is bits 8..15, so a read of one through the declared
+ * variable is spelled `(uint8_t)(eax >> 8)` and a write masks `0xFF00`. Small
+ * population — 23 mentions over 4 functions on each PE32 binary and 11 over 3
+ * on each x64 one at `2328657` — but a refusal would leave every one of them an
+ * undeclared name and the gate red, so they are spelled rather than refused.
  */
 const HIGH_BYTE_REGS = new Set(["ah", "bh", "ch", "dh"]);
 
+/** The one C variable a function declares for a canonical register. */
+interface RegVar {
+  /** Its name, which is always an alias of the register — `eax`, `rcx`, `r8d`, `dx`. */
+  name: string;
+  /** The width that name denotes, in bytes. */
+  width: number;
+  /** The C type it is declared with. */
+  type: string;
+}
+
 /**
- * A register read, spelled so that it names storage the emitted function writes.
+ * A register read, spelled through the ONE variable the function declares for
+ * that register.
  *
- * Registers reach the output as undeclared free variables, one per *name* — and
- * the names are whatever the instructions used, so `dx` and `edx` are two
+ * Registers used to reach the output as undeclared free variables, one per
+ * *name* — whatever the instructions used — so `dx` and `edx` were two
  * unrelated variables in C while being one register in the machine. t64's
- * `wcslen` is the clean example (peek-a-bin-uxm): the body assigns `edx` and
- * the loop condition tests `dx`, so as C the loop tests a variable nothing ever
- * assigns and cannot terminate. That is not a cosmetic mismatch — it is
- * compilable C whose meaning is not the machine's, which is the one thing this
- * emitter refuses.
+ * `wcslen` was the clean example (peek-a-bin-uxm): the body assigned `edx` and
+ * the loop condition tested `dx`, so as C the loop tested a variable nothing
+ * ever assigned and could not terminate. 979 of 1072 corpus functions and
+ * 7,519 undeclared (function, name) pairs carried the class; the only reason
+ * `cc` read clean was `preludeFor` inventing a `long` per name (peek-a-bin-k8i,
+ * peek-a-bin-n9cl.4). A previous repair here respelled a narrow READ as a
+ * narrowing of the widest alias the function *assigned*, which could not touch
+ * the narrow-WRITE/wide-read half (`al = …; if ((uint32_t)rax != 0)`) — there
+ * was no variable to write.
  *
- * A read is therefore respelled as an explicit narrowing of the widest alias of
- * the same machine register that the function *assigns*, and only then: if the
- * name being read is itself assigned, the C already says what it means and a
- * cast would be noise (t32's `wcslen` writes `dx` and is left alone). Nothing
- * is invented — the low 16 bits of EDX are DX — and the rewrite is correct
- * whichever order the two appear in, since a read before the assignment is an
- * indeterminate value in C exactly as the incoming register is in the machine.
+ * `registerVariables` now declares one variable per canonical register the
+ * body mentions, at the widest alias mentioned, and every mention is spelled
+ * through it:
+ *
+ *  - a read of the declared name is that name;
+ *  - a read of a narrower alias is an explicit narrowing, `(uint16_t)edx` — the
+ *    low 16 bits of EDX are DX, whichever order the two appear in, since a read
+ *    before any assignment is an indeterminate value in C exactly as the
+ *    incoming register is in the machine;
+ *  - a high-byte read is `(uint8_t)(eax >> 8)` (see `HIGH_BYTE_REGS`);
+ *  - a read WIDER than the declared name is left exactly as written, undeclared.
+ *    That can only happen past the PE32 cap (`int64_t rcx;` is never declared
+ *    in a 32-bit function), and it is a canonical name leaking into a 32-bit
+ *    body — the `unencodableNames` gate's defect class. Spelling it through the
+ *    32-bit variable would hide the leak from both gates; leaving it visible is
+ *    the point.
+ *
+ * Writes are the other half and live in `narrowRegisterWrite`.
  *
  * The width comes from the register name; the *signedness* has to come from the
  * operation, because narrowing changes what a comparison tests. `js` on DL is a
@@ -818,54 +876,163 @@ const HIGH_BYTE_REGS = new Set(["ah", "bh", "ch", "dh"]);
  * different program that compiles. Callers pass `signed` for the operands of a
  * signed comparison and for the value an arithmetic shift right shifts.
  *
- * 8-, 16- and 32-bit names are respelled; only the 64-bit ones are excluded,
- * because nothing is wider for them to be a sub-register of.
- *
- * 32-bit names used to be excluded too, on the reasoning that `eax` is the whole
- * register in 32-bit code and a sub-register of RAX in 64-bit code and emit is
- * not told which it is looking at, so treating it as partial would be a guess.
- * **Emit does not need to be told — the alias search below already answers it.**
- * A read is respelled only if the function assigns a *strictly wider* alias of
- * the same machine register, and on a PE32 image nothing ever does: measured over
- * both 32-bit corpus binaries, **0 functions assign any bare 64-bit register
- * name**, so every 32-bit read finds no alias and returns its own name. The
- * exclusion was doing no work that the search was not already doing, while
- * costing the largest population of the defect this function exists to fix —
- * 214 reads over 88 distinct (function, name) pairs on t64 and 211 over 85 on
- * w64, almost all of them a 32-bit read of an accumulator a *call* assigned as
- * RAX (`rax = GetFileType(); if (eax != 0)`, where nothing assigns `eax`)
- * (`peek-a-bin-k8i`).
- *
- * That does leave a standing dependency: if some pass ever emits a bare 64-bit
- * register assignment into a 32-bit function, PE32 output starts being respelled
- * too. `peek-a-bin-0s6e` is the near miss — `simplifyPhis` substitutes a phi
- * operand carrying the canonical 64-bit name into ordinary statements, which
- * reaches t32 as `rcx_18 = rcx` — and it is harmless here only because the
- * *assigned* side is a variable, so `_assignedRegs` never sees `rcx`.
- *
- * The alias chosen is the *narrowest* one wider than the read, because that is
- * the least the spelling has to claim.
+ * A register name `isKnownRegister` does not admit (`tmp_xchg`, a `stk_<addr>`
+ * slot) or whose width C has no integer for (`st0`, `xmm0`) has no variable and
+ * is printed as is: the residue class `corpus/emitAudits.ts` counts and does
+ * not gate (see `registerVariables`).
  */
 function registerText(expr: IRExpr & { kind: "reg" }, signed: boolean): string {
   const lower = expr.name.toLowerCase();
-  if (_assignedRegs.has(lower)) return expr.name;
-  if (!isKnownRegister(lower) || HIGH_BYTE_REGS.has(lower)) return expr.name;
+  if (!isKnownRegister(lower)) return expr.name;
+  const decl = _regVars.get(canonReg(lower));
+  if (!decl || lower === decl.name) return expr.name;
   const width = regSize(lower);
-  if (width > 4) return expr.name;
+  // Wider than the variable: past the cap, left visible (see above).
+  if (width >= decl.width) return expr.name;
   const spelling = signed ? SIGNED_TYPE[width] : UNSIGNED_TYPE[width];
   if (!spelling) return expr.name;
+  if (HIGH_BYTE_REGS.has(lower)) return `(${spelling})(${decl.name} >> 8)`;
+  return `(${spelling})${decl.name}`;
+}
 
-  const canon = canonReg(lower);
-  let alias: string | null = null;
-  for (const assigned of _assignedRegs) {
-    if (!isKnownRegister(assigned) || canonReg(assigned) !== canon) continue;
-    if (regSize(assigned) <= width) continue;
-    if (alias === null || regSize(assigned) < regSize(alias)) alias = assigned;
+/**
+ * `value` as an unsigned `width`-byte quantity, without a second cast where the
+ * text already is one.
+ *
+ * A narrow register read is spelled `(uint8_t)eax` by `registerText`, and a
+ * lifted `movzx` is already a `cast` to the same type; wrapping either again
+ * would say nothing twice. A non-negative constant that fits the width is its
+ * own truncation, so `rax = 0` rather than `rax = (uint32_t)0`.
+ */
+function narrowedValue(value: IRExpr, width: number): string {
+  const type = UNSIGNED_TYPE[width];
+  if (value.kind === "const" && value.value >= 0 && value.value < 2 ** (width * 8)) {
+    return emitExpr(value, 99);
   }
-  // Nothing wider is assigned, so there is no alias to tie this read to: it is
-  // an incoming value, and its own name is the honest thing to call it.
-  if (alias === null) return expr.name;
-  return `(${spelling})${alias}`;
+  const text = emitExpr(value, 99);
+  // A 1- or 2-byte load is already spelled `*(uint8_t*)…` / `*(uint16_t*)…`
+  // by `sizeToType`, an unsigned value of exactly this width. (A 4-byte load is
+  // `int32_t` and DOES need the cast: assigned to a 64-bit variable it would
+  // sign-extend where the machine zero-extends.)
+  if (value.kind === "deref" && value.size === width && width <= 2) return text;
+  return text.startsWith(`(${type})`) ? text : `(${type})${text}`;
+}
+
+/**
+ * The statement a write to a SUB-register of a declared variable emits, or null
+ * where the write is of the declared name itself and the plain `dest = src`
+ * is right.
+ *
+ * With one variable per register, a write to an alias narrower than the
+ * declared one has to say what the machine does to the rest of the register,
+ * and the truncation has to be IN THE EXPRESSION — the same principle as the
+ * `mov r32, r32` zero-extension gotcha: C has no partial assignment, so a plain
+ * `rax = e` would claim all 64 bits were written.
+ *
+ *  - a 32-bit write on x64 ZERO-EXTENDS (Intel SDM vol. 1 §3.4.1.1):
+ *    `rax = (uint32_t)e`. This arm can only fire when the declared width is 8,
+ *    i.e. on a PE32+ image, because the cap keeps a 32-bit function's variables
+ *    at 32 bits;
+ *  - an 8- or 16-bit write leaves the rest of the register in place:
+ *    `eax = (eax & ~0xFF) | (uint8_t)e`, `eax = (eax & ~0xFFFF) | (uint16_t)e`,
+ *    and for a high byte `eax = (eax & ~0xFF00) | ((uint8_t)e << 8)`.
+ *
+ * `~0xFF` is an `int` of value -256, which every declared type here (a signed
+ * or unsigned `<stdint.h>` integer of 1..8 bytes) converts to all-ones above
+ * bit 7 — so the mask is right at every declared width without being spelled
+ * at one. A write WIDER than the declared name (a canonical name past the PE32
+ * cap) returns null and prints as written, undeclared, for `registerText`'s
+ * reason.
+ *
+ * A compound spelling (`eax += 1`) is only offered for a full-width write; a
+ * narrow one is always the explicit merge, since `(eax & ~0xFF) |= …` is not C.
+ */
+function narrowRegisterWrite(dest: IRExpr & { kind: "reg" }, src: IRExpr): string | null {
+  const lower = dest.name.toLowerCase();
+  if (!isKnownRegister(lower)) return null;
+  const decl = _regVars.get(canonReg(lower));
+  if (!decl || lower === decl.name) return null;
+  const width = regSize(lower);
+  if (width >= decl.width || !UNSIGNED_TYPE[width]) return null;
+  const value = narrowedValue(src, width);
+  if (width === 4) return `${decl.name} = ${value}`;
+  const high = HIGH_BYTE_REGS.has(lower);
+  const mask = formatHex(((1 << (width * 8)) - 1) << (high ? 8 : 0));
+  const term = high ? `(${value} << 8)` : value;
+  return `${decl.name} = (${decl.name} & ~${mask}) | ${term}`;
+}
+
+/**
+ * Rank a register alias for "widest mention": width first, and a high-byte
+ * alias below its low-byte sibling at the same width, so `al` names AX's byte
+ * and `ah` never becomes the variable's name while any other alias exists.
+ */
+function aliasRank(name: string): number {
+  return regSize(name) * 2 - (HIGH_BYTE_REGS.has(name) ? 1 : 0);
+}
+
+/** The declaration widths C has an integer spelling for. */
+const DECLARABLE_WIDTHS = new Set([1, 2, 4, 8]);
+
+/**
+ * ONE C VARIABLE PER CANONICAL REGISTER PER FUNCTION, at the widest alias the
+ * body mentions, capped at the image width (peek-a-bin-n9cl.4).
+ *
+ * The cap is `regAtSize(canon, 4)` when the image is PE32, and it is what keeps
+ * the `unencodableNames` corpus gate at 0: `int64_t rcx;` must never appear in
+ * a function whose instruction set has no RCX. A red row there is the cap
+ * CATCHING an upstream canonical-name leak — the leaked read is left visibly
+ * undeclared (`registerText`) — not a reason to loosen it. `is64` is the
+ * pipeline's own answer carried on `IRFunction`, deliberately not inferred from
+ * the body the way `ssadestroy.ts`'s `registerSpeller` infers its (see
+ * `IRFunction.is64`).
+ *
+ * The type is `sizeToType(width)`, refined from type inference when it names
+ * the SAME width — `capturedOperandType`'s rule, applied to the canonical
+ * register `typeInfer.ts` keys on. That refinement is what revives the
+ * `inferTypes → emit` register channel, which had no reader while registers
+ * were undeclared; the width guard is what stops a `HANDLE` or a `struct_1*`
+ * spelling reaching a declaration and rescaling the byte arithmetic the body
+ * already emits (see `structPointer`).
+ *
+ * WHAT IS NOT DECLARED, and counted rather than hidden: a register name
+ * `isKnownRegister` refuses (`tmp_xchg`, a `stk_<addr>` slot) or whose width has
+ * no C integer (`st0` at 10 bytes, `xmm0` at 16). Those print as written and
+ * `corpus/emitAudits.ts`'s `undeclaredIdentifiers` reports them as its
+ * `residue` class beside the gated `register + minted`. Measured at `2328657`:
+ * 12 `stk_` mentions per PE32 binary, 0 of the others anywhere.
+ *
+ * A high-byte alias mentioned beside any other alias of the same register
+ * forces the variable to at least 16 bits (`ax`), or `(uint8_t)(al >> 8)` would
+ * name bits AL does not have. A function that mentions only `ah` keeps `ah`.
+ */
+function registerVariables(
+  mentions: ReadonlyMap<string, Set<string>>,
+  is64: boolean,
+): Map<string, RegVar> {
+  const out = new Map<string, RegVar>();
+  for (const [canon, names] of mentions) {
+    let widest: string | null = null;
+    for (const name of names) {
+      if (widest === null || aliasRank(name) > aliasRank(widest)) widest = name;
+    }
+    if (widest === null) continue;
+    let width = regSize(widest);
+    if (names.size > 1 && width < 2 && [...names].some((n) => HIGH_BYTE_REGS.has(n))) width = 2;
+    if (!is64 && width > 4) width = 4;
+    if (!DECLARABLE_WIDTHS.has(width)) continue;
+    // `regAtSize` answers the canonical name for a width it has no alias at,
+    // which is exactly the case the width test above has already refused.
+    // A lone `ah` keeps its name; beside any other alias the variable is never
+    // named after a high byte (its width was forced to 2 above).
+    const name =
+      width === regSize(widest) && (names.size === 1 || !HIGH_BYTE_REGS.has(widest))
+        ? widest
+        : regAtSize(canon, width);
+    if (regSize(name) !== width) continue;
+    out.set(canon, { name, width, type: capturedOperandType(width, canon) });
+  }
+  return out;
 }
 
 // ── Call results ──
@@ -935,15 +1102,14 @@ function collectCapturedCalls(body: readonly IRStmt[]): Set<IRStmt> {
  * not.
  *
  * It is `emitFunction`'s FIRST act, before `collectCapturedCalls` and
- * `collectAssignedRegs`, and that ordering is the whole of its safety. Folding
- * removes an assignment of the accumulator, so `_assignedRegs` may lose that
- * name — and `registerText` respells a narrow read as a narrowing of the widest
- * *assigned* alias. Computing both sets over the folded body keeps the output
- * self-consistent by construction: a read is respelled exactly when a wider
- * alias really is assigned in the text the reader sees. Removing an assigned
- * name can only ever *withdraw* a respelling, never add one, and k8i's own rule
- * says the residue is honest — a name with no wider assigned alias is an
- * incoming value and its own name is what to call it.
+ * `collectDeclarations`, and that ordering is the whole of its safety. Folding
+ * removes a mention of the accumulator, and the declaration block is computed
+ * from the mentions the reader will see: a function whose only mention of RAX
+ * was the folded pair declares no `rax` at all, and one that still reads it
+ * elsewhere declares it at the widest alias that survives. Computing the
+ * declarations over the folded body keeps the output self-consistent by
+ * construction — nothing is declared that the text does not name, and nothing
+ * the text names goes undeclared.
  *
  * Nor can it change which *other* calls print a result. Before the fold the
  * accumulator is dead immediately above `<acc> = f()` (the assignment kills
@@ -1300,65 +1466,107 @@ function liveInStmt(stmt: IRStmt, liveOut: ReadonlySet<string>, ctx: LiveCtx): S
 }
 
 /**
- * Every register name the function assigns, so `registerText` can tell a read
- * that names storage the body writes from one that does not.
+ * Every register and every `IRVar` the body mentions, for the declaration
+ * block — registers grouped by canonical name with each alias spelled, so
+ * `registerVariables` can pick the widest; variables by name with the width
+ * `IRVar.size` carries.
  *
  * A call's result register counts only when the call is one whose result is
- * emitted (`captured`). The two have to agree: this set is what licenses
- * respelling a read of `al` as `(uint8_t)rax`, and that spelling is a lie about
- * a function whose only write of RAX is a call result that was never printed.
+ * printed (`captured`): the variable exists so the reader can see where the
+ * value came from, and a name the body never prints needs no declaration. A phi
+ * that reaches emission prints as a comment and assigns nothing, so its
+ * operands are not mentions either. Everything else `walkExpr` reaches is one.
  *
- * The `never` binding at the bottom is load-bearing: a new `IRStmt` kind that
- * can assign a register would otherwise be missed silently, and the symptom
- * would be a read spelled as an alias of a register that is no longer written.
+ * The `never` binding at the bottom is load-bearing for the same reason
+ * `collectCapturedOperands`' is: a new `IRStmt` kind that can mention a register
+ * would otherwise be missed silently, and the symptom — a register printed
+ * under a name the declaration block does not carry — is exactly what the
+ * `undeclaredIdentifiers` corpus gate exists to catch, but only there.
  */
-function collectAssignedRegs(
+function collectDeclarations(
   stmts: readonly IRStmt[],
-  out: Set<string>,
   captured: ReadonlySet<IRStmt>,
+  regs: Map<string, Set<string>>,
+  vars: Map<string, number>,
 ): void {
+  const reg = (name: string): void => {
+    const lower = name.toLowerCase();
+    if (!isKnownRegister(lower)) return;
+    const canon = canonReg(lower);
+    const names = regs.get(canon) ?? new Set<string>();
+    names.add(lower);
+    regs.set(canon, names);
+  };
+  const mention = (e: IRExpr): void => {
+    if (e.kind === "reg") {
+      reg(e.name);
+    } else if (e.kind === "var") {
+      if (!vars.has(e.name)) vars.set(e.name, e.size);
+    } else if (e.kind === "call") {
+      // An indirect call holds its register as TEXT (`(*esi)`) — see
+      // `calleeText`, which spells the same parse.
+      const target = indirectCallTarget(calleeName(e));
+      if (target !== null) reg(target);
+    }
+  };
+  const expr = (e: IRExpr | undefined): void => {
+    if (e) walkExpr(e, mention);
+  };
   for (const stmt of stmts) {
     switch (stmt.kind) {
       case "assign":
-        if (stmt.dest.kind === "reg") out.add(stmt.dest.name.toLowerCase());
+        expr(stmt.dest);
+        expr(stmt.src);
+        break;
+      case "store":
+        expr(stmt.address);
+        expr(stmt.value);
         break;
       case "call_stmt":
-        if (stmt.resultDest?.kind === "reg" && captured.has(stmt))
-          out.add(stmt.resultDest.name.toLowerCase());
+        expr(stmt.call);
+        if (stmt.resultDest && captured.has(stmt)) expr(stmt.resultDest);
         break;
-      case "phi":
-        out.add(stmt.dest.name.toLowerCase());
+      case "return":
+        expr(stmt.value);
         break;
       case "if":
-        collectAssignedRegs(stmt.thenBody, out, captured);
-        if (stmt.elseBody) collectAssignedRegs(stmt.elseBody, out, captured);
+        expr(stmt.condition);
+        collectDeclarations(stmt.thenBody, captured, regs, vars);
+        if (stmt.elseBody) collectDeclarations(stmt.elseBody, captured, regs, vars);
         break;
       case "while":
       case "do_while":
-        collectAssignedRegs(stmt.body, out, captured);
+        expr(stmt.condition);
+        collectDeclarations(stmt.body, captured, regs, vars);
         break;
       case "for":
-        collectAssignedRegs([stmt.init, stmt.update], out, captured);
-        collectAssignedRegs(stmt.body, out, captured);
+        expr(stmt.condition);
+        collectDeclarations([stmt.init, stmt.update], captured, regs, vars);
+        collectDeclarations(stmt.body, captured, regs, vars);
         break;
       case "switch":
-        for (const c of stmt.cases) collectAssignedRegs(c.body, out, captured);
-        if (stmt.defaultBody) collectAssignedRegs(stmt.defaultBody, out, captured);
+        expr(stmt.expr);
+        for (const c of stmt.cases) collectDeclarations(c.body, captured, regs, vars);
+        if (stmt.defaultBody) collectDeclarations(stmt.defaultBody, captured, regs, vars);
         break;
       case "try":
-        collectAssignedRegs(stmt.body, out, captured);
-        collectAssignedRegs(stmt.handler, out, captured);
+        expr(stmt.filterExpr);
+        collectDeclarations(stmt.body, captured, regs, vars);
+        collectDeclarations(stmt.handler, captured, regs, vars);
         break;
-      case "store":
-      case "return":
+      // A branch is extracted before structuring and throws in `emitStmt`; its
+      // condition is still read so that, should one ever get this far, the
+      // names it prints are at least declared.
+      case "branch":
+        expr(stmt.condition);
+        break;
+      case "phi":
       case "goto":
       case "label":
       case "comment":
       case "raw":
       case "break":
       case "continue":
-      // A branch assigns no register — it only reads its condition.
-      case "branch":
         break;
       default: {
         const _exhaustive: never = stmt;
@@ -1390,6 +1598,14 @@ function collectAssignedRegs(
  * type inference has an opinion about 10 and every one of them agrees in width,
  * so today the guard costs nothing and refuses nothing — it is a bound on the
  * rule, not a saving.
+ *
+ * Since `peek-a-bin-n9cl.4` this is also the rule for a REGISTER variable
+ * (`registerVariables`, asked with the canonical name `typeInfer.ts` keys on)
+ * and for the split-repair and `clobbered_` variables `ssadestroy.ts` mints. For
+ * a register the width guard is what it refuses that matters: `HANDLE`,
+ * `PVOID` and `struct_N*` have no `castWidth`, so a register is never declared
+ * as a pointer and `emitsAsPointer` stays false for it — the byte arithmetic the
+ * body emits off a register cannot be rescaled by its declaration.
  */
 function capturedOperandType(size: number, name: string): string {
   const inferred = _typeCtx?.types.get(name);
@@ -1408,11 +1624,12 @@ function capturedOperandType(size: number, name: string): string {
  * identifier nothing in it declares — 114 of them over the four corpus
  * binaries, one per capture, all of them invisible because
  * `corpus/emitAudits.ts`' `preludeFor` answers gcc's complaint by manufacturing
- * a `long` of its own. That is not the documented decision to leave a *register*
- * undeclared (see `structPointer`): a capture is not a register and not an
- * incoming value, it is a local written by a statement this emitter itself
- * emits, and the other locals the pipeline invents (`var_N` from `promoteVars`)
- * are declared. The `long` was also the wrong width for every one of the 114 —
+ * a `long` of its own. A capture is not a register and not an incoming value, it
+ * is a local written by a statement this emitter itself emits, and the other
+ * locals the pipeline invents (`var_N` from `promoteVars`) are declared.
+ * (Registers have since been declared too — `registerVariables` — which is why
+ * this pass runs first and the register/variable pass excludes what it
+ * declared.) The `long` was also the wrong width for every one of the 114 —
  * 64 are 4 bytes, 42 are 1 and 8 are 2, and not one is 8 — so the program gcc
  * actually compiled was not the one the emitter wrote.
  *
@@ -1587,7 +1804,7 @@ function emitExpr(expr: IRExpr, parentPrec = 0, signed = false): string {
     }
 
     case "call": {
-      const name = calleeText(expr.display?.split("!")?.pop() ?? expr.target);
+      const name = calleeText(calleeName(expr));
       const ioctlArg = ioctlCodeArgIndex(name);
       const args = expr.args
         .map((a, i) => {
@@ -1718,6 +1935,15 @@ function emitStmt(stmt: IRStmt, level: number): EmitResult {
 
   switch (stmt.kind) {
     case "assign": {
+      // A write to a sub-register of the declared variable merges into it —
+      // see `narrowRegisterWrite`. Decided before anything else, because the
+      // compound and increment spellings below assume the destination is the
+      // whole variable.
+      const narrow = stmt.dest.kind === "reg" ? narrowRegisterWrite(stmt.dest, stmt.src) : null;
+      if (narrow !== null) {
+        push(`${pad}${narrow};`, addr);
+        break;
+      }
       const dest = emitExpr(stmt.dest, 0);
       const src = emitExpr(stmt.src, 0);
       // Compound assignment: dest = dest OP rhs → dest OP= rhs
@@ -1763,14 +1989,19 @@ function emitStmt(stmt: IRStmt, level: number): EmitResult {
     }
 
     case "call_stmt": {
-      const call = emitExpr(stmt.call, 0);
       // The result register, when the body reads it — see `collectCapturedCalls`.
-      // Its own name, not `registerText`'s: the result is RAX or EAX, which that
-      // never respells anyway, and an assignment target is the one position
-      // where a narrowing cast would not be an lvalue.
+      // Through the same write rule as an `assign`: the lifter names the result
+      // at the image's width, so today this is always the declared variable
+      // itself, and the merge arm is a bound rather than a saving.
       const dest =
-        stmt.resultDest?.kind === "reg" && _capturedCalls.has(stmt) ? stmt.resultDest.name : null;
-      push(`${pad}${dest === null ? "" : `${dest} = `}${call};`, addr);
+        stmt.resultDest?.kind === "reg" && _capturedCalls.has(stmt) ? stmt.resultDest : null;
+      const narrow = dest === null ? null : narrowRegisterWrite(dest, stmt.call);
+      if (narrow !== null) {
+        push(`${pad}${narrow};`, addr);
+        break;
+      }
+      const call = emitExpr(stmt.call, 0);
+      push(`${pad}${dest === null ? "" : `${emitExpr(dest, 0)} = `}${call};`, addr);
       break;
     }
 
@@ -2572,7 +2803,8 @@ export function emitFunction(
   const prevUsedEnums = _usedEnums;
   const prevEnumTypesNeeded = _enumTypesNeeded;
   const prevDeclaredVarTypes = _declaredVarTypes;
-  const prevAssignedRegs = _assignedRegs;
+  const prevRegVars = _regVars;
+  const prevVarDecls = _varDecls;
   const prevCapturedCalls = _capturedCalls;
   const prevCapturedOperands = _capturedOperands;
   _typeCtx = typeCtx;
@@ -2588,15 +2820,10 @@ export function emitFunction(
   _usedEnums = new Map();
   _enumTypesNeeded = new Set();
   _declaredVarTypes = new Map();
-  // Computed before the body for the same reason the layouts are: a register
-  // read has to know, at the point it is emitted, whether the function assigns
-  // that name anywhere at all.
-  // Which calls print their result has to be settled before both of the sets
-  // below: it decides what the body says, and `_assignedRegs` has to agree with
-  // what the body says.
+  // Which calls print their result has to be settled before the declarations
+  // are collected: it decides what the body says, and the declaration block has
+  // to agree with what the body says.
   _capturedCalls = collectCapturedCalls(func.body);
-  _assignedRegs = new Set();
-  collectAssignedRegs(func.body, _assignedRegs, _capturedCalls);
   for (const d of [...func.params, ...func.locals]) {
     _declaredVarTypes.set(d.name, d.type);
     const id = declaredStructPointer(d.type);
@@ -2615,6 +2842,23 @@ export function emitFunction(
   _capturedOperands = new Map();
   collectCapturedOperands(func.body, new Set(_declaredVarTypes.keys()), _capturedOperands);
   for (const [name, type] of _capturedOperands) _declaredVarTypes.set(name, type);
+  // Computed before the body for the same reason the layouts are: a register
+  // read has to know, at the point it is emitted, which variable it is spelled
+  // through and at what width. Registers first, then every variable the body
+  // names that nothing above declared — a capture READ without its definition
+  // is deliberately left to `collectCapturedOperands`' refusal.
+  {
+    const regMentions = new Map<string, Set<string>>();
+    const varMentions = new Map<string, number>();
+    collectDeclarations(func.body, _capturedCalls, regMentions, varMentions);
+    _regVars = registerVariables(regMentions, func.is64);
+    _varDecls = new Map();
+    for (const [name, size] of varMentions) {
+      if (_declaredVarTypes.has(name) || isCapturedOperandName(name)) continue;
+      _varDecls.set(name, capturedOperandType(size, name));
+    }
+    for (const [name, type] of _varDecls) _declaredVarTypes.set(name, type);
+  }
   try {
     return emitFunctionBody(func);
   } finally {
@@ -2629,7 +2873,8 @@ export function emitFunction(
     _usedEnums = prevUsedEnums;
     _enumTypesNeeded = prevEnumTypesNeeded;
     _declaredVarTypes = prevDeclaredVarTypes;
-    _assignedRegs = prevAssignedRegs;
+    _regVars = prevRegVars;
+    _varDecls = prevVarDecls;
     _capturedCalls = prevCapturedCalls;
     _capturedOperands = prevCapturedOperands;
   }
@@ -2781,9 +3026,32 @@ function emitFunctionBody(func: IRFunction): EmitFunctionResult {
   lineAddrs.push(undefined);
 
   // Local variable declarations
-  if (func.locals.length > 0 || _capturedOperands.size > 0 || _unrecovered.length > 0) {
+  if (
+    func.locals.length > 0 ||
+    _regVars.size > 0 ||
+    _varDecls.size > 0 ||
+    _capturedOperands.size > 0 ||
+    _unrecovered.length > 0
+  ) {
     for (const local of func.locals) {
       lines.push(`    ${local.type} ${local.name};`);
+      lineAddrs.push(undefined);
+    }
+    // One variable per canonical register the body names, at the widest alias
+    // mentioned — see `registerVariables`. Uninitialised, which is the honest
+    // reading of a register whose first mention is a read: an incoming value
+    // the function did not compute. Sorted by name so the block is stable
+    // across body changes.
+    for (const decl of [..._regVars.values()].sort((a, b) => a.name.localeCompare(b.name))) {
+      lines.push(`    ${decl.type} ${decl.name};`);
+      lineAddrs.push(undefined);
+    }
+    // Every variable `ssadestroy.ts` minted that the body names — a split
+    // repair (`ecx_3`) or a call-clobbered value (`clobbered_rcx_2`), the
+    // latter never assigned, which is the "indeterminate" its docstring
+    // describes and what an uninitialised declaration says.
+    for (const [name, type] of [..._varDecls].sort((a, b) => a[0].localeCompare(b[0]))) {
+      lines.push(`    ${type} ${name};`);
       lineAddrs.push(undefined);
     }
     // A spoiled compare's captured operands. Declared here rather than left to

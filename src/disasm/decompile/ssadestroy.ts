@@ -162,7 +162,19 @@ const HIGH_BYTE = /^[abcd]h$/;
  * So the scope is the **live range**, and the function is only the fallback.
  * Every register mention *except* a lowered phi copy already carries its own
  * width — `stripVersionsExpr` drops the version and keeps the name — which is
- * why the copy is the one statement that has to be told. A live range here is a
+ * why the copy is the one statement that has to be told.
+ *
+ * WHAT THIS DECIDES SINCE peek-a-bin-n9cl.4 IS THE WIDTH, NOT THE VARIABLE.
+ * `emit.ts` now declares ONE C variable per canonical register per function and
+ * spells every alias through it, so `r9d` and `r9` above are one variable on the
+ * page (`r9 = (uint32_t)…` and `r9`) and the two-names-for-two-ranges half of
+ * the paragraph above no longer separates anything — the copy really would land
+ * above the stores as a write of the pointer they read. That half is carried
+ * by `splitStaleReads` instead, at the value level: the phi copy is a WRITE in
+ * the predecessor it lands in, so the entry value the stores read is parked at
+ * the function's entry (`r9_0 = r9`) and read from there — see the "phi is a
+ * write in each predecessor" section there. The per-web spelling stays for what
+ * it was always evidence of: which WIDTH the copy's name should carry. A live range here is a
  * *phi web*: the versions a phi ties together, transitively, restricted to one
  * canonical register (after `ssaOptimize` an operand may name a different
  * register entirely, and that is a genuine cross-register copy whose two sides
@@ -380,16 +392,92 @@ function splitStaleReads(ctx: SSAContext, spell: Speller): Map<string, string> {
     }
   }
 
+  // ── A phi is a WRITE in each predecessor, where its copy lands ──
+  //
+  // `destroySSA` lowers a phi to a copy appended to each operand's block, before
+  // that block's terminator — not to a statement in the phi's own block — and a
+  // predecessor routinely dominates blocks the phi block does not: a loop
+  // header's entry edge, with the loop itself skipped by a guard. So as a write
+  // of the register in the program the reader sees, the phi belongs to
+  // `op.blockId`, and it executes on EVERY exit of that block, the bypass edge
+  // included. `defBlocks` feeds the version-0 rule below, which asks whether a
+  // dominating write has already overwritten the entry value; with the phi
+  // attributed to its own block alone that question was answered NO for
+  //
+  //     mov rbp, r9        ; RBP := R9's entry value, a pointer
+  //     mov r9d, r14d      ; deleted after copy propagation — its value
+  //                        ; survives only as the loop header's phi operand
+  //     ...                ; the copy `r9d = r14d_1` lands HERE, in the
+  //                        ; header's predecessor, which the guarded stores
+  //                        ; below are dominated by; the header is not
+  //     mov [rbp+0x18], esi   ; a read of R9's entry value, through RBP
+  //
+  // and the stores were left reading a bare `r9`. Under one name per live range
+  // that was survivable — `r9d = …` and `r9` were two C variables
+  // (peek-a-bin-pzws) — and under one variable per canonical register
+  // (peek-a-bin-n9cl.4) the copy prints as `r9 = (uint32_t)…` and six stores
+  // plus a `rax = r9` per x64 binary went through a pointer the C had already
+  // reassigned: the rows `corpus/staleReads.ts` reported the moment it compared
+  // canonical registers, with the same predecessor attribution that audit has
+  // made since peek-a-bin-fppy. The pair below is the value-level repair those
+  // rows always wanted: the predecessor is a writer (`defBlocks`), and a
+  // predecessor whose exit still holds the entry value hands the phi's version
+  // to its OTHER successors (`phiCopiesOut`, read by `entryState`), so a
+  // version-0 read on the bypass path is stale at all and is routed to the one
+  // copy taken at the function's entry.
+  //
+  // Noted exactly where `destroySSA` will emit a copy — a cross-register
+  // operand or a call-clobbered one; a same-register operand the register
+  // still holds is skipped there as a no-op and writes nothing. (The third
+  // emitted shape, a copy from a stale operand's repair variable, is decided
+  // by this very pass and is not modelled here: it writes value(W) over a
+  // register holding V on the bypass edge, a lost-copy hazard that predates
+  // and is independent of the version-0 rule.) Only an ABSENT exit state is
+  // replaced: a predecessor whose exit holds version V != 0 hands on a
+  // cross-register operand copy propagation substituted FOR `C_V`, so the value
+  // the copy writes is V's and a downstream read of V stays right.
+  /** Predecessor block → the phi versions its lowered copies will write. */
+  const phiCopiesOut = new Map<number, { canon: string; version: number }[]>();
+  for (const b of ctx.blocks) {
+    for (const phi of ctx.phis.get(b.id) ?? []) {
+      if (phi.dest.version === undefined) continue;
+      const canon = canonReg(phi.dest.name);
+      for (const op of phi.operands) {
+        if (!known.has(op.blockId)) continue;
+        const srcCanon = canonReg(op.value.name);
+        const clobber =
+          op.value.version !== undefined &&
+          ctx.clobbered.has(ssaVersionKey(srcCanon, op.value.version));
+        if (srcCanon === canon && !clobber) continue;
+        noteDef(canon, op.blockId);
+        const list = phiCopiesOut.get(op.blockId) ?? [];
+        list.push({ canon, version: phi.dest.version });
+        phiCopiesOut.set(op.blockId, list);
+      }
+    }
+  }
+
   // ── Which version reaches each block's exit ──
+  //
+  // `exitState` is the state BEFORE the block's phi copies run — a phi operand
+  // is read at that point, and the operand loop below judges it there. What a
+  // successor inherits is the state after them, which `entryState` builds.
   const exitState = new Map<number, Map<string, number>>();
   for (const id of blockIds) exitState.set(id, new Map());
+  const exitAfterCopies = (p: number): Map<string, number> => {
+    const state = new Map(exitState.get(p) ?? []);
+    for (const copy of phiCopiesOut.get(p) ?? []) {
+      if (!state.has(copy.canon)) state.set(copy.canon, copy.version);
+    }
+    return state;
+  };
   const entryState = (b: { id: number; preds: number[] }): Map<string, number> => {
     const preds = b.preds.filter((p) => known.has(p));
     const state = new Map<string, number>();
     if (preds.length === 0) return state;
-    for (const [k, v] of exitState.get(preds[0]) ?? []) state.set(k, v);
+    for (const [k, v] of exitAfterCopies(preds[0])) state.set(k, v);
     for (const p of preds.slice(1)) {
-      const other = exitState.get(p) ?? new Map();
+      const other = exitAfterCopies(p);
       for (const k of [...state.keys()]) {
         if (other.get(k) !== state.get(k)) state.set(k, NO_SURVIVING_VERSION);
       }

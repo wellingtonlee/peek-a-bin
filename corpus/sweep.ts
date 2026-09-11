@@ -34,7 +34,7 @@ import {
   type CrossEdgeGuardResult,
   emptyCrossEdgeGuards,
 } from "./crossEdgeGuards";
-import { declaredParams } from "./emitAudits";
+import { declaredParams, stripDeclarationBlock } from "./emitAudits";
 import {
   auditFrameRepurpose,
   emptyFrameRepurpose,
@@ -1184,14 +1184,18 @@ function auditClobbered(res: BinResult): void {
     for (const line of f.code.split("\n")) {
       if (/^\}\s*while\s*\(/.test(line.trim())) res.clobbered.doWhiles++;
     }
-    const hits = [...f.code.matchAll(NAME)];
+    // Over the body WITHOUT its declaration block: since peek-a-bin-n9cl.4 the
+    // emitter declares every `clobbered_<reg>_<n>` it names (`int64_t
+    // clobbered_rcx_4;`), and a declaration is not a read — counted, it took
+    // this row 21 → 38 on each x64 binary, exactly + the 17 distinct names.
+    const hits = [...stripDeclarationBlock(f.code).matchAll(NAME)];
     if (hits.length === 0) continue;
     res.clobbered.funcsAffected++;
     res.clobbered.occurrences += hits.length;
-    // Every occurrence in the emitted *body* is a read: the declaration is not
-    // the emitter's, it is `emitAudits.ts`'s prelude, which is added later and
-    // is not part of `code`. Distinct names are counted per function, since the
-    // name is scoped to one.
+    // Every occurrence in the emitted *body* is a read: the one declaration is
+    // in the block `stripDeclarationBlock` removed above (before n9cl.4 it was
+    // `emitAudits.ts`'s prelude, added later and never part of `code`).
+    // Distinct names are counted per function, since the name is scoped to one.
     const distinct = new Set<string>();
     for (const h of hits) {
       distinct.add(h[0]);

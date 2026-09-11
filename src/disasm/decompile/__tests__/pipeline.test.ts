@@ -103,6 +103,28 @@ function withoutStructCasts(code: string): string {
   return code.replace(/\(\(struct_\w+ \*\)([^()]*)\)->/g, "$1->");
 }
 
+/**
+ * The emitted code without the function's declaration block — the lines
+ * between the header and the first blank line, where every register and every
+ * minted variable is declared since peek-a-bin-n9cl.4. For assertions that
+ * count MENTIONS of a name, which a declaration is not.
+ */
+function withoutDeclarations(code: string): string {
+  const lines = code.split("\n");
+  const out: string[] = [];
+  let inDecls = false;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (i > 0 && lines[i - 1].endsWith(") {") && /^ {4}\S.* \w+;$/.test(line)) inDecls = true;
+    if (inDecls) {
+      if (line === "") inDecls = false;
+      continue;
+    }
+    out.push(line);
+  }
+  return out.join("\n");
+}
+
 /** The declared type of a field in the emitted `typedef struct` block. */
 function declaredType(code: string, fieldName: string): string | undefined {
   const line = code.split("\n").find((l) => l.trim().endsWith(`${fieldName};`));
@@ -518,7 +540,7 @@ describe("decompileFunction — sbb/adc read CF as a value", () => {
       ]),
       true,
     );
-    expect(code).toContain("rax = -(al < dl);");
+    expect(code).toContain("rax = -((uint8_t)rax < dl);");
     expect(code).toContain("return rax + 1 - (rax != 0);");
     expect(code).not.toContain("unlifted");
   });
@@ -2616,11 +2638,14 @@ describe("decompileFunction — control-flow structuring", () => {
       ]),
     );
 
-    // No pre-test on a register the loop body is what assigns.
+    // No pre-test on a register the loop body is what assigns. The `return`
+    // names EAX, so the byte is written INTO the one variable declared for the
+    // register and tested through it (peek-a-bin-n9cl.4).
+    expect(code).not.toMatch(/while \(\(uint8_t\)eax != 0\) \{/);
     expect(code).not.toMatch(/while \(al != 0\) \{/);
     // The load comes first, then the test, in that order.
-    const load = code.search(/al = /);
-    const test = code.search(/al == 0/);
+    const load = code.search(/eax = \(eax & ~0xFF\) \| \*\(uint8_t\*\)\(esi\);/);
+    const test = code.search(/\(uint8_t\)eax == 0/);
     expect(load).toBeGreaterThanOrEqual(0);
     expect(test).toBeGreaterThan(load);
     expect(code).toMatch(/break;|goto /);
@@ -4164,7 +4189,8 @@ describe("decompileFunction — an instruction is lifted once, and reads what it
       true,
     );
 
-    expect(code.match(/rcx/g)).toHaveLength(1);
+    // One READ of RCX, plus its declaration (`int64_t rcx;`, peek-a-bin-n9cl.4).
+    expect(withoutDeclarations(code).match(/rcx/g)).toHaveLength(1);
     expect(code).toContain("rax - rcx >> 1");
   });
 
@@ -5245,6 +5271,63 @@ describe("decompileFunction — a sub-register read names storage the body write
 
     expect(code).toContain("while ((uint16_t)edx != 0)");
     expect(code).not.toMatch(/\bdx != 0/);
+    // And the tested name IS the assigned one: one declared variable for RDX,
+    // written in the body, read in the condition — so the loop the C states
+    // can end (peek-a-bin-n9cl.4). Before, `dx` and `edx` were two free
+    // variables and the loop tested one nothing assigned.
+    expect(code).toMatch(/^\s+int32_t edx;$/m);
+    expect(code).toMatch(/^\s+edx = /m);
+    expect(code).not.toMatch(/^\s+\w+ dx;$/m);
+  });
+
+  /**
+   * THE NARROW-WRITE / WIDE-READ HALF, which the old `registerText` alias
+   * search could not touch: `al = …` followed by a read of RAX was a write to
+   * one free variable and a read of another. With one declared variable the
+   * write merges into it and the read reads the merged value.
+   *
+   * The source is a memory load ON PURPOSE. A constant or a register copy in
+   * its place is substituted into the 64-bit read by `copyPropagation` /
+   * `constantPropagation` with no truncation or refusal — `mov al, 5` reaches
+   * the page as `*(int64_t*)(r8) = 5` — a pre-existing width-blind
+   * propagation class this bead measured and did not take on (100/105/94/91
+   * sub-register writes beside a wider alias on t32/t64/w64/w32 at `2328657`).
+   * Two readers, so the fold cannot inline the merge into one of them.
+   */
+  it("reads the merged value after a sub-register write", () => {
+    const code = run64(
+      seq(0x401000, [
+        ["mov", "al, byte ptr [rdx]"], // 0x401000
+        ["mov", "qword ptr [r8], rax"], // 0x401004
+        ["mov", "qword ptr [r9], rax"], // 0x401008
+        ["ret"],
+      ]),
+    );
+
+    expect(code).toMatch(/^\s+int64_t rax;$/m);
+    expect(code).toContain("rax = (rax & ~0xFF) | *(uint8_t*)(rdx);");
+    expect(code).toContain("*(int64_t*)(r8) = rax;");
+    expect(code).toContain("*(int64_t*)(r9) = rax;");
+    expect(code).not.toMatch(/\bal\b/);
+  });
+
+  it("zero-extends a 32-bit write into the 64-bit variable it is a part of", () => {
+    // A 32-bit load in a function that also reads RAX at 64 bits: the write
+    // clears bits 63:32, and the C has to say so — `rax = *(int32_t*)(rbx)`
+    // would sign-extend a negative value. A load rather than `mov eax, ebx`,
+    // for the reason the case above gives: a register copy is propagated into
+    // the 64-bit reads as a bare `ebx`, the pre-existing width-blind class.
+    const code = run64(
+      seq(0x401000, [
+        ["mov", "eax, dword ptr [rbx]"], // 0x401000
+        ["mov", "qword ptr [rcx], rax"], // 0x401004
+        ["mov", "qword ptr [rdx], rax"], // 0x401008
+        ["ret"],
+      ]),
+    );
+
+    expect(code).toContain("rax = (uint32_t)*(int32_t*)(rbx);");
+    expect(code).toContain("*(int64_t*)(rcx) = rax;");
   });
 
   it("leaves a sub-register the body does assign exactly as it is", () => {
@@ -7060,7 +7143,17 @@ describe("decompileFunction — a Jcc alone in its block reads its predecessor's
       ]),
     );
 
-    expect(guardTexts(code)).toEqual(["ah != al", "ah >= al", "ah != al"]);
+    // AH and AL are the only mentions of RAX (`mov eax, ecx` folds into the
+    // `return`), so the one variable declared for the register is the 16-bit
+    // container of both, and each byte is spelled through it — the high byte
+    // shifted down (peek-a-bin-n9cl.4). Two variables `ah` and `al` would be
+    // the dx/edx defect this rule exists to end.
+    expect(guardTexts(code)).toEqual([
+      "(uint8_t)(ax >> 8) != (uint8_t)ax",
+      "(uint8_t)(ax >> 8) >= (uint8_t)ax",
+      "(uint8_t)(ax >> 8) != (uint8_t)ax",
+    ]);
+    expect(code).toContain("    uint16_t ax;");
     expect(code).not.toContain("__unrecovered");
   });
 
@@ -8250,6 +8343,10 @@ describe("a matched push/pop restores the value the machine saved", () => {
     expect(code).toBe(
       [
         "int sub_401000() {",
+        "    int32_t ebx;",
+        "    int32_t edx;",
+        "    int32_t edx_0;",
+        "",
         "    edx_0 = edx;",
         "    edx = ebx;",
         "    do {",
@@ -8278,7 +8375,9 @@ describe("a matched push/pop restores the value the machine saved", () => {
         ["ret"],
       ]),
     );
-    expect(code).toBe(["int sub_401000() {", "    return ecx;", "}"].join("\n"));
+    expect(code).toBe(
+      ["int sub_401000() {", "    int32_t ecx;", "", "    return ecx;", "}"].join("\n"),
+    );
   });
 
   /**
@@ -8520,5 +8619,116 @@ describe("decompileFunction — /GS: the check call takes no result and the retu
       facts(CHECK32, check32(), false),
     );
     expect(code).toMatch(/^\s*__security_cookie = eax;$/m);
+  });
+});
+
+/**
+ * A PHI'S LOWERED COPY IS A WRITE IN THE PREDECESSOR IT LANDS IN, and the
+ * version-0 repair has to see it there (peek-a-bin-n9cl.4).
+ *
+ * `destroySSA` lowers a phi to a copy appended to each operand's block, before
+ * its terminator — so the copy runs on every exit of that block, the edge that
+ * bypasses the phi block included. `splitStaleReads` attributed the phi's write
+ * to the phi's OWN block, which a loop header's entry predecessor dominates
+ * blocks the header does not; a read of the register's entry value in such a
+ * block was judged un-clobbered and left as the bare register.
+ *
+ * The shape is t64!sub_1400045DC / w64!sub_14000496C: `mov rbp, r9` parks the
+ * entry R9 (a pointer), `mov r9d, r14d` is deleted after copy propagation
+ * substitutes `r14d` into the loop header's phi, so the 32-bit range's only
+ * write is the phi copy `r9d = r14d` in the header's predecessor — and copy
+ * propagation forwards `rbp` to the entry `r9`, so the stores under the guard
+ * read `r9`. While `r9d` and `r9` were two undeclared C variables that was
+ * survivable (peek-a-bin-pzws spelled the two live ranges apart for exactly
+ * this case); with one variable per register the copy prints `r9 = (uint32_t)
+ * r14d` and six stores plus a `rax = r9` went through a pointer the C had
+ * already reassigned — the rows `corpus/staleReads.ts` reported the moment it
+ * compared canonical registers. The repair is the entry copy the version-0
+ * rule always had, now reachable: `r9_0 = r9;` at the top and every entry-value
+ * read spelled through it.
+ */
+describe("decompileFunction — a phi's lowered copy is a write in the predecessor it lands in", () => {
+  it("routes an entry-value read below a bypassed loop through the entry copy (loop exit merges)", () => {
+    const code = run(
+      seq(0x401000, [
+        ["mov", "rbp, r9"], // 0x401000  RBP := entry R9
+        ["mov", "r14d, dword ptr [rdx]"], // 0x401004
+        ["mov", "r9d, r14d"], // 0x401008  deleted: survives only as the phi operand
+        ["test", "ecx, ecx"], // 0x40100c
+        ["je", "0x401020"], // 0x401010  bypass the loop
+        ["add", "r9d, 1"], // 0x401014  header: r9 = phi(entry copy, latch)
+        ["dec", "ecx"], // 0x401018
+        ["jne", "0x401014"], // 0x40101c
+        ["mov", "dword ptr [rbp+0x18], esi"], // 0x401020  a read of the ENTRY R9
+        ["mov", "rax, rbp"], // 0x401024
+        ["ret"], // 0x401028
+      ]),
+      true,
+    );
+
+    // The phi copy is a write of the ONE variable declared for R9 (the
+    // single-use load of R14D folds into it)...
+    expect(code).toMatch(/^\s+int64_t r9;$/m);
+    const PHI_COPY = /^\s+r9 = \(uint32_t\)\*\(int32_t\*\)\(rdx\);$/m;
+    expect(code).toMatch(PHI_COPY);
+    // ...so the entry value is parked at the function's entry, above it, and
+    // every read of it goes through the copy.
+    const entryCopy = code.search(/^\s+r9_0 = r9;$/m);
+    const phiCopy = code.search(PHI_COPY);
+    expect(entryCopy).toBeGreaterThanOrEqual(0);
+    expect(entryCopy).toBeLessThan(phiCopy);
+    expect(code).toContain("*(int32_t*)(r9_0 + 0x18) = esi;");
+    expect(code).toContain("return r9_0;");
+    expect(code).not.toMatch(/\(r9 \+ 0x18\)/);
+  });
+
+  it("sees the copy on the bypass edge alone, where no other path disagrees", () => {
+    // The pure bypass: the store block's ONLY predecessor is the block holding
+    // the phi copy, and the loop exits elsewhere. The reaching-version state
+    // at that block would otherwise still say "entry value" — the write it
+    // cannot see is the copy at its predecessor's end.
+    const code = run(
+      seq(0x401000, [
+        ["mov", "rbp, r9"], // 0x401000
+        ["mov", "r14d, dword ptr [rdx]"], // 0x401004
+        ["mov", "r9d, r14d"], // 0x401008
+        ["test", "ecx, ecx"], // 0x40100c
+        ["je", "0x401028"], // 0x401010  bypass, straight to the store
+        ["add", "r9d, 1"], // 0x401014  header
+        ["dec", "ecx"], // 0x401018
+        ["jne", "0x401014"], // 0x40101c
+        ["mov", "eax, r9d"], // 0x401020
+        ["ret"], // 0x401024
+        ["mov", "dword ptr [rbp+0x18], esi"], // 0x401028  only reached from 0x401010
+        ["mov", "rax, rbp"], // 0x40102c
+        ["ret"], // 0x401030
+      ]),
+      true,
+    );
+
+    expect(code).toMatch(/^\s+r9_0 = r9;$/m);
+    expect(code).toContain("*(int32_t*)(r9_0 + 0x18) = esi;");
+    expect(code).not.toMatch(/\(r9 \+ 0x18\)/);
+  });
+
+  it("takes no entry copy where the register's only phi copy is a same-register no-op", () => {
+    // `r9d = r9d` is skipped by `destroySSA`, so nothing writes R9 before the
+    // store and the entry value is what the register holds: the bare read is
+    // right and a repair would be a line saying nothing.
+    const code = run(
+      seq(0x401000, [
+        ["mov", "rbp, r9"], // 0x401000
+        ["test", "ecx, ecx"], // 0x401004
+        ["je", "0x401014"], // 0x401008
+        ["dec", "ecx"], // 0x40100c  header, loops on ECX alone
+        ["jne", "0x40100c"], // 0x401010
+        ["mov", "dword ptr [rbp+0x18], esi"], // 0x401014
+        ["ret"], // 0x401018
+      ]),
+      true,
+    );
+
+    expect(code).not.toContain("r9_0");
+    expect(code).toContain("*(int32_t*)(r9 + 0x18) = esi;");
   });
 });

@@ -62,6 +62,7 @@ function fn(body: IRStmt[], over: Partial<IRFunction> = {}): IRFunction {
     params: [],
     locals: [],
     body,
+    is64: true,
     ...over,
   };
 }

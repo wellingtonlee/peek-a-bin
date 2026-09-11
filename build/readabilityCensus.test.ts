@@ -38,7 +38,9 @@ import {
   gotosPer100Lines,
   headerReturnType,
   REGISTER_NAME,
+  RESIDUE_NAME,
   stackPointerScaffolding,
+  stripDeclarationBlock,
   unliftedBaseMnemonic,
   unliftedCensus,
   voidReturnsValue,
@@ -133,16 +135,37 @@ describe("REGISTER_NAME against ir.ts (the differential)", () => {
       expect(`${not}: ${REGISTER_NAME.test(not)}`).toBe(`${not}: false`);
   });
 
-  it("classifies register, minted, api and other in that order of precedence", () => {
+  it("classifies register, residue, minted, api and other in that order of precedence", () => {
     const api = new Set(["ExitProcess", "rax"]);
     expect(classifyIdentifier("rax", api)).toBe("register");
     expect(classifyIdentifier("ecx_12", api)).toBe("register");
     expect(classifyIdentifier("clobbered_rcx_4", api)).toBe("minted");
     expect(classifyIdentifier("flg_401000_0", api)).toBe("minted");
-    expect(classifyIdentifier("stk_3", api)).toBe("minted");
     expect(classifyIdentifier("__unrecovered_9", api)).toBe("minted");
     expect(classifyIdentifier("ExitProcess", api)).toBe("api");
     expect(classifyIdentifier("something", api)).toBe("other");
+  });
+
+  /**
+   * THE RESIDUE, the class the emitter refuses to declare and the gate excludes
+   * (peek-a-bin-n9cl.4). `stk_` was `minted` before and is checked BEFORE
+   * `MINTED_NAME` now; the XMM names were `register` and are not, since a
+   * 16-byte register has no C integer to be declared as. Both orders are pinned
+   * here because a wrong one puts a refused name inside the gate, and the gate
+   * would then be red for a reason no emitter change can fix.
+   */
+  it("files the names the emitter refuses to declare as residue, outside the gate", () => {
+    const api = new Set<string>();
+    for (const name of ["stk_401000", "stk_3", "tmp_xchg", "st0", "st7", "xmm0", "xmm15", "ymm3"])
+      expect(`${name}: ${classifyIdentifier(name, api)}`).toBe(`${name}: residue`);
+    for (const name of ["xmm0", "ymm15", "st0", "stk_3"])
+      expect(`${name}: ${REGISTER_NAME.test(name)}`).toBe(`${name}: false`);
+    // Not residue: a real GPR, a minted name, and the look-alikes.
+    expect(RESIDUE_NAME.test("rax")).toBe(false);
+    expect(RESIDUE_NAME.test("clobbered_rcx_4")).toBe(false);
+    expect(RESIDUE_NAME.test("st8")).toBe(false);
+    expect(RESIDUE_NAME.test("xmm16")).toBe(false);
+    expect(RESIDUE_NAME.test("stk_")).toBe(false);
   });
 });
 
@@ -267,6 +290,68 @@ describe("adjacent copy pairs", () => {
   it("is indifferent to `==`", () => {
     const r = copyPairs(sets("int f(void) {\n    a = 1;\n    if (b == a) {\n    }\n}"));
     expect(r.pairs).toBe(0);
+  });
+});
+
+/**
+ * THE DECLARATION BLOCK IS NOT STATEMENTS (peek-a-bin-n9cl.4). Since the
+ * emitter declares every register and minted variable, three text scans were
+ * counting `int64_t rsp;` as a stack-pointer read, `int64_t clobbered_rcx_4;`
+ * as a clobbered read, and a declaration line as a statement between two
+ * others. `stripDeclarationBlock` is what they read through; both halves of its
+ * recognition are pinned here — every line declaration-shaped AND a blank line
+ * closing the block — so a body can never be stripped by mistake.
+ */
+describe("the declaration block is stripped before a text scan counts mentions", () => {
+  const withBlock =
+    "int f(int64_t arg0) {\n    int64_t var_8;\n    int64_t rsp;\n    int32_t ecx_3;\n" +
+    "    intptr_t __unrecovered_1; /* not recovered */\n\n    rsp -= 8;\n    ecx_3 = rsp;\n}";
+
+  it("removes exactly the block and keeps the header and the body", () => {
+    expect(stripDeclarationBlock(withBlock)).toBe(
+      "int f(int64_t arg0) {\n    rsp -= 8;\n    ecx_3 = rsp;\n}",
+    );
+  });
+
+  it("leaves a function with no block, and one whose first line is a statement, untouched", () => {
+    const none = "int f(void) {\n    return eax;\n}";
+    expect(stripDeclarationBlock(none)).toBe(none);
+    // A keyword line is not declaration-shaped, so a blank line after it does
+    // not make a block of what precedes it.
+    const keyword = "int f(void) {\n    return eax;\n\n    x = 1;\n}";
+    expect(stripDeclarationBlock(keyword)).toBe(keyword);
+    // No header at all: nothing to anchor on.
+    expect(stripDeclarationBlock("garbage")).toBe("garbage");
+  });
+
+  it("does not read a stack-pointer DECLARATION as a stack-pointer read", () => {
+    const r = stackPointerScaffolding(sets(withBlock));
+    expect(r.writes).toBe(1);
+    // `ecx_3 = rsp;` is the one read; `int64_t rsp;` is not.
+    expect(r.reads).toBe(1);
+    const noRead = stackPointerScaffolding(sets("int f(void) {\n    int64_t rsp;\n\n    rsp -= 8;\n}"));
+    expect(noRead.writeNoRead).toBe(1);
+    expect(noRead.reads).toBe(0);
+  });
+
+  it("does not pair a definition with a copy across the block", () => {
+    // Without the strip, `int32_t ecx;` sits between the two and they are not
+    // adjacent; with it they are, which is what the page shows.
+    const r = copyPairs(
+      sets("int f(void) {\n    int32_t ecx;\n    int32_t edx_3;\n\n    edx_3 = 1;\n    ecx = edx_3;\n}"),
+    );
+    expect(r.pairs).toBe(1);
+    expect(r.lines).toBe(4);
+  });
+
+  it("counts a copy through a narrowing cast — the zero-extending write into a wider variable", () => {
+    const r = copyPairs(sets("int f(void) {\n    eax_3 = 0;\n    rax = (uint32_t)eax_3;\n}"));
+    expect(r.pairs).toBe(1);
+    // `rax` is a bare register but `eax_3` is not ITS versioned name, so the
+    // swapDefWithCopy sub-count stays at 0 — the same rule as without the cast.
+    expect(r.versionToRegister).toBe(0);
+    const same = copyPairs(sets("int f(void) {\n    rax_3 = 0;\n    rax = (uint32_t)rax_3;\n}"));
+    expect(same.versionToRegister).toBe(1);
   });
 });
 

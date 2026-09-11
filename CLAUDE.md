@@ -613,7 +613,8 @@ which is the half worth reading before quoting a green run.
 
 Gates at 0: condition polarity (anchor A only — A2 and B are reported and must not gate), loop
 exits, call arity **over**, stale guards, cross-edge guards, stale reads, pop reads, lost defs, arm
-exits, unencodable names, wild branches, self-assign `wrong`/`unresolved`, frame repurposing,
+exits, unencodable names, **undeclared register and minted names** (`register + minted`, since
+`peek-a-bin-n9cl.4`), wild branches, self-assign `wrong`/`unresolved`, frame repurposing,
 `signatureAgreement` **over on x64**, member-name agreement, `offsetof` struct layouts (ratio
 1.00 — it proves a declaration self-consistent and can **never** see a wrong identity), `distinct callees lost`, emitter
 `throws`, and `guard lines unparsed`. Report-only and **not** targets: unrecovered values (a rise
@@ -623,9 +624,12 @@ callees (watch `internalUnlabelled`, not `internal`), empty case bodies, loop sh
 reaching the page (it rises with correct recovery *and* with fabrication).
 
 **Nine readability censuses landed as report-only rows ahead of the decompiler-readability epic
-(`peek-a-bin-n9cl.1`), each with a liveness half, none gating in this session**: `undeclared
-identifiers` (what `preludeFor` invents, classified register/minted/api/other — the register class
-gates at 0 in the register-variables child); `unlifted instructions` by base mnemonic (the ONE row
+(`peek-a-bin-n9cl.1`), each with a liveness half; one has since become a gate**: `undeclared
+identifiers` (what `preludeFor` invents, classified register/residue/minted/api/other — **`register
++ minted` GATES at 0 since `peek-a-bin-n9cl.4`**, 1460/2443/2265/1417 → 0/0/0/0 at `2328657`, the
+negative control returning 1518/2612/2419/1471; `residue` is the class the emitter refuses to
+declare — `stk_`, `tmp_xchg`, `st0`, `xmm` — reported beside it, never inside it); `unlifted
+instructions` by base mnemonic (the ONE row
 of the group `compare.mjs` judges: a rise in any bucket is a regression); `void returning a value`
 (0/3/3/0 at 6299113 — the plan's 48/44 predates the `__try` narrowing; gates in the return-type
 child); `stack-pointer scaffolding` by shape; `adjacent copy pairs`; `goto density` (**MUST NEVER
@@ -765,6 +769,30 @@ folded line keeps the **CALL's** address.
 
 **emit.ts module-level `_typeCtx`**: set before emission, cleared after. Enables cast suppression and
 type-aware idioms (INVALID_HANDLE_VALUE, NT_SUCCESS, SUCCEEDED/FAILED).
+
+**REGISTERS ARE DECLARED VARIABLES: one C variable per canonical register per function, at emit**
+(`registerVariables`, `emit.ts`, `peek-a-bin-n9cl.4`). Until then every register reached the page
+undeclared, one free variable per *name*, so `dx` and `edx` were two C variables for one machine
+register — t64's `wcslen` assigned `edx` and tested `dx`, a loop that as C could not end — and
+`cc` read 1072/1072 clean only because `corpus/emitAudits.ts`'s `preludeFor` invented a `long`
+per name (979/1072 functions, 7,519 pairs). The rule: the variable is named for the **widest alias
+the body mentions, capped at the image width** (`regAtSize(canon, 4)` when `!IRFunction.is64` —
+the cap is what keeps the PE32-only `unencodableNames` gate at 0, and a red row there is the cap
+*catching* a canonical-name leak, never a reason to loosen it); typed `sizeToType(width)`, refined
+from `typeCtx.types.get(canon)` only when the widths agree, so a register is never declared a
+pointer and `emitsAsPointer` stays false for it. A narrow **read** is `(uint16_t)edx` (high byte
+`(uint8_t)(eax >> 8)`); a narrow **write** puts the truncation IN the expression — `rax =
+(uint32_t)(e)` for a 32-bit write on x64 (zero-extension, SDM) and `eax = (eax & ~0xFF) |
+(uint8_t)(e)` for 8/16 bits — through `narrowRegisterWrite`, decided first in the `assign` and
+`call_stmt` arms. Every non-param/local `IRVar` the body names is declared too (`rcx_0`-style
+split repairs; `clobbered_<reg>_<n>` uninitialised, which is the indeterminate it denotes).
+**Counted and NOT declared**: `stk_*`, `tmp_xchg`, `st0`, `xmm*` — the audit's `residue` class.
+`IRFunction.is64` is set by `promoteVars` from the pipeline's own flag — **never** inferred from
+the body the way `registerSpeller` infers its (`peek-a-bin-0s6e`'s leak would read as evidence).
+`_assignedRegs` and `registerText`'s alias search are gone; the register stays the **prefix** of
+every spelling, which `corpus/selfAssigns.ts` relies on. The declaration block is the lines
+between the header and the first blank line, and `corpus/emitAudits.ts`'s `stripDeclarationBlock`
+is the one declaration of that shape for every text scan that counts *mentions*.
 
 ## Gotchas
 
@@ -1210,6 +1238,22 @@ refused. **Read the long-form entry before changing the code it describes.**
   (`lifter.ts`) are the one declaration of the `__imp_` spelling**; epic n9cl's IAT-slot loads must
   reuse it, and `corpus/sweep.ts`'s `emittedCallees` reads the prefix back so `distinct callees
   lost` stays 0.
+- **One variable per register made a SPELLING device load-bearing, and the value-level repair had
+  to replace it.** `peek-a-bin-pzws` spelled two live ranges of R9 as `r9` and `r9d` so that `mov
+  rbp, r9 / mov r9d, r14d / … / mov [rbp+0x18], esi` — copy propagation forwards `rbp` to the entry
+  `r9`, and the 32-bit range's only write is a lowered **phi copy** in the loop header's
+  predecessor — printed as two C variables. With one variable that copy is `r9 = (uint32_t)r14d_1`
+  above six stores through `r9`, and `corpus/staleReads.ts` went red at exactly those 6 per x64
+  binary the moment its `writes` test compared canonical registers (which under one variable per
+  register is the only correct test — the old name test is inverted, not dropped). The cause was in
+  `splitStaleReads`: it attributed a phi's write to the phi's **own** block, while `destroySSA` emits
+  the copy at the end of each **predecessor**, which dominates blocks the header does not — the same
+  attribution the audit has made since `peek-a-bin-fppy`. Two halves, both negative-controlled: the
+  predecessor is noted in `defBlocks`, and a predecessor whose exit still holds the entry value hands
+  the phi's version to its *other* successors (`phiCopiesOut`), so a version-0 read on a pure bypass
+  path is stale at all. Result: `r9_0 = r9;` at entry, the stores through `r9_0`, exactly one new
+  entry copy per affected function (`t64!sub_1400045DC`, `w64!sub_14000496C`), gate back at 0.
+  `registerSpeller`'s per-web spelling stays for what it was always evidence of: the **width**.
 
 ### UI, build and deployment
 

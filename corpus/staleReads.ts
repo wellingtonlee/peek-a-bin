@@ -44,7 +44,7 @@ import { buildCFG } from "../src/disasm/cfg";
 import { carryPredecessor, flagPredecessor } from "../src/disasm/decompile/flagModel";
 import { blockLiveOut, foldBlock } from "../src/disasm/decompile/fold";
 import type { IRExpr, IRReg, IRStmt } from "../src/disasm/decompile/ir";
-import { canonReg, isKnownRegister, regSize } from "../src/disasm/decompile/ir";
+import { canonReg, isKnownRegister } from "../src/disasm/decompile/ir";
 import {
   firstCalleeSavedWrites,
   liftBlock,
@@ -583,46 +583,39 @@ export function auditStaleV0Reads(
         for (const n of names) if (preserved.get(n) === s.canon) repaired = true;
       }
     if (repaired) continue;
-    // ── The write: a strictly dominating block assigns the name the read uses ──
+    // ── The write: a strictly dominating block assigns the variable the read
+    // is spelled through ──
     //
-    // THE NAME, NOT THE CANONICAL REGISTER, and the distinction is the whole of
-    // `peek-a-bin-pzws`. What this audit judges is the emitted C, and C's unit
-    // of identity is the identifier: `r9` and `r9d` are two unrelated variables
-    // there — that is precisely why `gcc -fsyntax-only` cannot see this defect
-    // class, and it cuts both ways. A register carrying a 64-bit range and a
-    // 32-bit range at once is correctly emitted as two names (`ssadestroy.ts`,
-    // "widest-in-the-function is the wrong scope"), and against a canonical
-    // test that correct output reads as a clobber that never happens: the
-    // dominating statement says `r9d = …` and the read says `r9`, so nothing
-    // the reader sees has changed. Asking about the canonical register makes
-    // the gate permanently red on the output it exists to certify.
+    // What this audit judges is the emitted C, and C's unit of identity is the
+    // identifier — which is precisely why `gcc -fsyntax-only` cannot see this
+    // defect class. Since `peek-a-bin-n9cl.4` the emitter declares ONE variable
+    // per canonical register per function and spells every alias through it
+    // (`r9d = …` prints as `r9 = (uint32_t)…`, a read of `r9d` as
+    // `(uint32_t)r9`), so a dominating write of ANY alias of the register is a
+    // write of the identifier the reader sees, whatever width either side used.
+    // The test is therefore the canonical register, which `d.canon === s.canon`
+    // below already is.
     //
-    // NOT A NARROWING, and it was checked rather than argued: with the naming
-    // fix reverted and this test in place the same twelve rows come back, one
-    // per store, because the copy is then spelled `r9` — the same identifier
-    // the stores read. What the name test removes is the false positive, not
-    // the finding.
-    //
-    // One emit rule has to be honoured here or the test *would* narrow.
-    // `emit.ts`'s `registerText` re-ties a read of width <= 2 to a wider
-    // assigned alias, so for those the emitted identifier is the wider name and
-    // a dominating write of any wider alias is a real clobber of what the
-    // reader sees.
+    // HISTORY, because the previous rule here was load-bearing and its
+    // reasoning has been INVERTED rather than dropped. Before n9cl.4 registers
+    // were undeclared free variables one per NAME, so `r9d = …` above a read of
+    // `r9` changed nothing the reader saw, and `peek-a-bin-pzws` made this a
+    // name test to stop that correct-in-C output reading as a clobber (twelve
+    // rows, one per store). Under one-variable-per-register the same twelve
+    // shapes WOULD be a clobber of what the reader sees — and are not in the
+    // corpus, because `ssadestroy.ts`'s live-range split spells each range from
+    // its own web (0 confirmed on all four binaries at the run that landed this
+    // rule). A row here now is a real wrong name on the page, not a spelling
+    // artefact, and `readNames` beside it is kept for the report only.
     let writes = false;
-    const clobbers = (name: string): boolean => {
-      const lower = name.toLowerCase();
-      if (readNames.has(lower)) return true;
-      const width = regSize(lower);
-      for (const r of readNames) if (regSize(r) <= 2 && width > regSize(r)) return true;
-      return false;
-    };
     for (const [id, stmts] of ctx.liftedBlocks) {
       if (!strictDom(id, s.block)) continue;
       for (const st of stmts) {
         const d = regDef(st);
-        if (d && d.version === undefined && d.canon === s.canon && clobbers(d.name)) writes = true;
+        if (d && d.version === undefined && d.canon === s.canon) writes = true;
       }
     }
+    void readNames;
     if (!(survives && writes)) continue;
     res.confirmed++;
     const reaching = s.reaching;

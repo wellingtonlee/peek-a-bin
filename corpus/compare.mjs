@@ -880,13 +880,35 @@ for (const b of bins) {
   // possible result.
 
   // The prelude's inventions, classified. `register + minted` is the k8i figure
-  // and gates at 0 once the register-variables child lands; until then both
-  // directions are information. `api + unknown types` is liveness: a FALL to 0
-  // means the prelude has nothing left to do, which is not this codebase.
+  // and GATES at 0 since peek-a-bin-n9cl.4 (emit.ts declares one variable per
+  // canonical register per function), so any rise is a regression here too.
+  // `residue` is what the emitter refuses to declare (stk_ slots, tmp_xchg, st0,
+  // xmm) and is information in both directions; absent on a side predating it,
+  // it reads NOT MEASURED. `api + unknown types` is liveness: a FALL to 0 means
+  // the prelude has nothing left to do, which is not this codebase.
   if (B.undeclared && C.undeclared) {
-    row("undeclared: register names", (x) => x.undeclared.register);
-    row("  minted pseudo-variables", (x) => x.undeclared.minted);
-    row("  register + minted (k8i)", (x) => x.undeclared.register + x.undeclared.minted);
+    row(
+      "undeclared: register names",
+      (x) => x.undeclared.register,
+      (a, c) => c > a,
+    );
+    row(
+      "  minted pseudo-variables",
+      (x) => x.undeclared.minted,
+      (a, c) => c > a,
+    );
+    row(
+      "  register + minted (k8i)",
+      (x) => x.undeclared.register + x.undeclared.minted,
+      (a, c) => c > a,
+    );
+    if (B.undeclared.residue !== undefined && C.undeclared.residue !== undefined) {
+      row("  residue (not declared)", (x) => x.undeclared.residue);
+    } else {
+      note(
+        "  residue (not declared)        NOT MEASURED on both sides (a run predating the class)",
+      );
+    }
     row("  api names used as values", (x) => x.undeclared.api);
     row("  other", (x) => x.undeclared.other);
     row("  unknown type names", (x) => x.undeclared.unknownTypes);

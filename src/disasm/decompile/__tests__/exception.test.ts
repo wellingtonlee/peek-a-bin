@@ -47,6 +47,7 @@ describe("Exception Handling IR", () => {
       returnType: "void",
       params: [],
       locals: [],
+      is64: false,
       body: [tryStmt],
     };
 
@@ -82,6 +83,7 @@ describe("Exception Handling IR", () => {
       returnType: "void",
       params: [],
       locals: [],
+      is64: false,
       body: [tryStmt],
     };
 
@@ -105,6 +107,7 @@ describe("Exception Handling IR", () => {
       returnType: "void",
       params: [],
       locals: [],
+      is64: false,
       body: [tryStmt],
     };
 
@@ -130,6 +133,7 @@ describe("Exception Handling IR", () => {
       returnType: "void",
       params: [],
       locals: [],
+      is64: false,
       body: [tryStmt],
     };
 

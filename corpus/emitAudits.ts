@@ -752,6 +752,49 @@ export function declaredParams(
 }
 
 /**
+ * The emitted C after its DECLARATION BLOCK — the lines between the header and
+ * the one blank line that closes them, where `emit.ts` declares every local,
+ * every register variable, every minted variable, every capture and every
+ * `__unrecovered_N` (peek-a-bin-n9cl.4). Returns the code unchanged when there
+ * is no block.
+ *
+ * For the text scans that count MENTIONS of a name: a declaration is not a
+ * read, and three of them were counting it as one the moment registers became
+ * declared — `auditClobbered` in `sweep.ts` (21 → 38 "clobbered reads" on each
+ * x64 binary, exactly + the 17 distinct names), `stackPointerScaffolding`
+ * (`int64_t rsp;` read as a stack-pointer READ, taking `writeNoRead` 4/18/17/4
+ * → 0) and `copyPairs` (a declaration line between two statements is not a
+ * statement). The shape is the emitter's own and is invariant over the corpus
+ * — 0 non-declaration lines inside the block over 1072 functions at `2328657`
+ * — and the block is recognised by BOTH halves: every line must be
+ * declaration-shaped AND a blank line must close it, so a function with no
+ * block (93 of 1072) loses nothing and a body line can never be mistaken for a
+ * declaration (`return eax;` is a keyword, not a type).
+ */
+export function stripDeclarationBlock(code: string): string {
+  const sig = declaredParams(code);
+  if (sig === null) return code;
+  const head = code.slice(0, sig.bodyAt);
+  const rest = code.slice(sig.bodyAt);
+  const lines = rest.split("\n");
+  // `rest` begins with the remainder of the header line (empty), so the block
+  // starts at index 1.
+  const end = lines.indexOf("", 1);
+  if (end < 0) return code;
+  for (let i = 1; i < end; i++) if (!DECLARATION_LINE.test(lines[i])) return code;
+  return head + [lines[0], ...lines.slice(end + 1)].join("\n");
+}
+
+/**
+ * One declaration line as `emit.ts` prints it: four spaces, a type (one or two
+ * words, an optional pointer star on either side), the name, `;`, and for an
+ * `__unrecovered_N` a trailing comment. The negative lookahead keeps the C
+ * statement keywords out, so `    return eax;` never reads as a declaration.
+ */
+const DECLARATION_LINE =
+  /^ {4}(?!return\b|goto\b|break\b|continue\b)[A-Za-z_]\w*(?: \*+| \w+)? \*?\w+;(?: \/\*.*\*\/)?$/;
+
+/**
  * A declared parameter the body overwrites from a callee-saved register before
  * ever reading it.
  *
@@ -815,7 +858,12 @@ export function paramClobberedAtEntry(sets: { funcs: FuncRec[] }[]): ParamClobbe
         // rather than by matching a whole line of expected whitespace.
         const first = new RegExp(`\\b${name}\\b`).exec(body);
         if (!first) continue;
-        const stmt = /^\s*=\s*([A-Za-z_]\w*)\s*;/.exec(body.slice(first.index + name.length));
+        // A read of a sub-register is spelled through the declared variable
+        // with a cast — `arg_28 = (uint32_t)rbx;` since peek-a-bin-n9cl.4 — so
+        // the cast is optional here or such a row would silently leave the gate.
+        const stmt = /^\s*=\s*(?:\((?:u?int(?:8|16|32|64)_t)\))?([A-Za-z_]\w*)\s*;/.exec(
+          body.slice(first.index + name.length),
+        );
         if (!stmt || !CALLEE_SAVED.test(stmt[1])) continue;
         hits++;
         out.clobbered++;
@@ -1053,15 +1101,19 @@ export function gotosPer100Lines(g: GotoResult): number {
 
 // ── Undeclared identifiers: what the prelude has been inventing ─────────────
 
-export type IdentClass = "register" | "minted" | "api" | "other";
+export type IdentClass = "register" | "residue" | "minted" | "api" | "other";
 
 /**
- * Every register name the emitter can spell, at every width, with an optional
- * SSA version suffix. Written out rather than imported from `ir.ts` so the
- * classification does not agree with the code under test by construction —
- * `build/readabilityCensus.test.ts` holds the differential against
- * `isKnownRegister`/`regAtSize`, which is where the two declarations are made to
- * meet. `SIXTY_FOUR_BIT` above is the same list at one width.
+ * Every general-purpose register name the emitter can spell, at every width,
+ * with an optional SSA version suffix. Written out rather than imported from
+ * `ir.ts` so the classification does not agree with the code under test by
+ * construction — `build/readabilityCensus.test.ts` holds the differential
+ * against `isKnownRegister`/`regAtSize`, which is where the two declarations are
+ * made to meet. `SIXTY_FOUR_BIT` above is the same list at one width.
+ *
+ * The XMM/YMM names are NOT here since `peek-a-bin-n9cl.4`: they are
+ * `RESIDUE_NAME`'s, because `emit.ts` declares every GPR the body names and
+ * gates on it, while a 16-byte register has no C integer to be declared as.
  */
 export const REGISTER_NAME = new RegExp(
   "^(?:" +
@@ -1069,16 +1121,35 @@ export const REGISTER_NAME = new RegExp(
     "e(?:ax|bx|cx|dx|si|di|bp|sp)|" +
     "(?:ax|bx|cx|dx|si|di|bp|sp)|" +
     "[abcd][lh]|(?:si|di|bp|sp)l|" +
-    "r(?:8|9|1[0-5])[bwd]?|" +
-    "[xy]mm(?:[0-9]|1[0-5])" +
+    "r(?:8|9|1[0-5])[bwd]?" +
     ")(?:_\\d+)?$",
 );
 
-/** The emitter's own pseudo-variables, each minted from an address or a version. */
-const MINTED_NAME = /^(?:clobbered_|flg_|stk_|__unrecovered_)/;
+/**
+ * THE RESIDUE: register-shaped names `emit.ts` deliberately does NOT declare,
+ * and which therefore stay outside the gate rather than inside it by accident.
+ * Each is a `reg`-kind IR node the emitter's `registerVariables` refuses — a
+ * name `isKnownRegister` does not admit (`tmp_xchg`, the `stk_<addr>` slot a
+ * matched push/pop pair mints) or a width with no C integer (`st0` at 10 bytes,
+ * `xmm0`/`ymm0` at 16/32). Counted and reported beside the gate, never folded
+ * into it: 12 `stk_` mentions per PE32 binary (6 pairs) and none of the others
+ * at `2328657`. `stk_` is checked here BEFORE `MINTED_NAME` and the test in
+ * `build/readabilityCensus.test.ts` pins the order.
+ */
+export const RESIDUE_NAME = /^(?:stk_[0-9a-f]+|tmp_xchg|st[0-7]|[xy]mm(?:[0-9]|1[0-5]))(?:_\d+)?$/;
+
+/**
+ * The emitter's own pseudo-variables, each minted from an address or a version.
+ * Every one of these is declared by `emit.ts` since `peek-a-bin-n9cl.4`
+ * (`flg_` and `__unrecovered_` already were), so one reaching this list is a
+ * declaration spelling that moved — or a `flg_` capture READ without its
+ * definition, which `collectCapturedOperands` leaves undeclared on purpose.
+ */
+const MINTED_NAME = /^(?:clobbered_|flg_|__unrecovered_)/;
 
 export function classifyIdentifier(name: string, apiNames: ReadonlySet<string>): IdentClass {
   if (REGISTER_NAME.test(name)) return "register";
+  if (RESIDUE_NAME.test(name)) return "residue";
   if (MINTED_NAME.test(name)) return "minted";
   if (apiNames.has(name)) return "api";
   return "other";
@@ -1100,13 +1171,16 @@ export interface UndeclaredResult {
   compiled: number;
   /** Compiles whose stderr held no parseable diagnostic at all. Expect 0. */
   unparseable: number;
-  /** (function, name) pairs gcc reported `undeclared`, by class. */
+  /** (function, name) pairs gcc reported `undeclared`, by class. `register + minted` GATES at 0. */
   register: number;
   minted: number;
+  /** The names the emitter refuses to declare (`RESIDUE_NAME`). Reported, never gated. */
+  residue: number;
   api: number;
   other: number;
   distinctRegister: number;
   distinctMinted: number;
+  distinctResidue: number;
   distinctApi: number;
   distinctOther: number;
   /** Functions with at least one undeclared identifier of any class. */
@@ -1136,14 +1210,19 @@ export interface UndeclaredResult {
  * This compiles each function ONCE, with `CC_HEADER` and no prelude, and
  * classifies every `'X' undeclared` gcc reports:
  *
- *   - **register** — a register name at any width, versioned or not. The
- *     decompiler uses these as program variables and declares none of them.
- *     The register-variables child of `peek-a-bin-n9cl` is expected to take
- *     `register + minted` to 0, at which point that sum becomes a GATE; here it
- *     is report-only and records the first durable k8i measurement.
- *   - **minted** — `clobbered_`, `flg_`, `stk_`, `__unrecovered_`: the emitter's
- *     own pseudo-variables. `__unrecovered_N` IS declared by the emitter, so its
- *     appearance here would mean the declaration spelling moved.
+ *   - **register** — a general-purpose register name at any width, versioned
+ *     or not. `emit.ts` declares ONE variable per canonical register per
+ *     function since `peek-a-bin-n9cl.4` (`registerVariables`), so this is 0
+ *     and `register + minted` is a GATE at 0 in `corpus.audit.ts`. It was
+ *     1452/2438/2260/1409 at `2328657`, the first durable k8i measurement, and
+ *     the negative control — skip the declaration loop — returns it there.
+ *   - **residue** — `stk_<addr>`, `tmp_xchg`, `st0..7`, `xmm`/`ymm`: register-
+ *     shaped names the emitter deliberately does not declare (see
+ *     `RESIDUE_NAME`). Reported beside the gate, never inside it.
+ *   - **minted** — `clobbered_`, `flg_`, `__unrecovered_`: the emitter's own
+ *     pseudo-variables, every one declared by the emitter, so an appearance
+ *     here means a declaration spelling moved (or a `flg_` capture is read
+ *     without its definition, which is left undeclared on purpose).
  *   - **api** — an imported function or an `apitypes.ts` name used as a value
  *     (a function pointer stored, say). The prelude legitimately supplies these
  *     and always will; with `unknownTypes` this is the LIVENESS half — the
@@ -1168,10 +1247,12 @@ export function undeclaredIdentifiers(
     unparseable: 0,
     register: 0,
     minted: 0,
+    residue: 0,
     api: 0,
     other: 0,
     distinctRegister: 0,
     distinctMinted: 0,
+    distinctResidue: 0,
     distinctApi: 0,
     distinctOther: 0,
     funcsAffected: 0,
@@ -1183,6 +1264,7 @@ export function undeclaredIdentifiers(
   };
   const distinct: Record<IdentClass, Set<string>> = {
     register: new Set(),
+    residue: new Set(),
     minted: new Set(),
     api: new Set(),
     other: new Set(),
@@ -1224,6 +1306,7 @@ export function undeclaredIdentifiers(
   }
   out.distinctRegister = distinct.register.size;
   out.distinctMinted = distinct.minted.size;
+  out.distinctResidue = distinct.residue.size;
   out.distinctApi = distinct.api.size;
   out.distinctOther = distinct.other.size;
   out.distinctUnknownTypes = unknownTypes.size;
@@ -1475,8 +1558,11 @@ export function stackPointerScaffolding(sets: { funcs: FuncRec[] }[]): StackPoin
       const code = r.code ?? "";
       if (code === "") continue;
       out.funcs++;
-      const sig = declaredParams(code);
-      const body = sig === null ? code : code.slice(sig.bodyAt);
+      // The body without its declaration block: `int64_t rsp;` is not a read
+      // (see `stripDeclarationBlock`).
+      const stripped = stripDeclarationBlock(code);
+      const sig = declaredParams(stripped);
+      const body = sig === null ? stripped : stripped.slice(sig.bodyAt);
       let reads = 0;
       let writes = 0;
       SP_TOKEN.lastIndex = 0;
@@ -1520,7 +1606,13 @@ export interface CopyPairResult {
 }
 
 const ASSIGN = /^([A-Za-z_]\w*)\s*=(?!=)\s*(.+);$/;
-const COPY = /^([A-Za-z_]\w*)\s*=(?!=)\s*([A-Za-z_]\w*);$/;
+/**
+ * The copy's source may carry ONE narrowing cast: since peek-a-bin-n9cl.4 a
+ * 32-bit write into a 64-bit register variable is `rax = (uint32_t)eax_3;`, and
+ * that is `swapDefWithCopy`'s shape exactly as `eax = eax_3;` is. Without it the
+ * row fell 494 → 368 on t64 at `2328657` on a census that had changed nothing.
+ */
+const COPY = /^([A-Za-z_]\w*)\s*=(?!=)\s*(?:\((?:u?int(?:8|16|32|64)_t)\))?([A-Za-z_]\w*);$/;
 
 /**
  * `v = X;` IMMEDIATELY FOLLOWED BY `r = v;` — A DEFINITION AND ITS COPY.
@@ -1554,7 +1646,9 @@ export function copyPairs(sets: { funcs: FuncRec[] }[]): CopyPairResult {
       const code = r.code ?? "";
       if (code === "") continue;
       out.funcs++;
-      const lines = code
+      // Statement lines only: the declaration block is not statements, and a
+      // pair straddling it would be one that is not adjacent on the page.
+      const lines = stripDeclarationBlock(code)
         .split("\n")
         .map((l) => l.trim())
         .filter((l) => l.length > 0);

@@ -1354,7 +1354,7 @@ of maximum cardinality over the same extents, by exhaustive search. `peek-a-bin-
 **Function, instruction and jump-table counts.** These move whenever detection changes, which is
 often, and usually because a defect was fixed.
 
-### The readability censuses — reported, and in this session never gated (`peek-a-bin-n9cl.1`)
+### The readability censuses — reported, one of them since gated (`peek-a-bin-n9cl.1`, `peek-a-bin-n9cl.4`)
 
 Nine rows landed together as the instruments for the decompiler-readability epic, BEFORE any
 engine change, so that every child of that epic has a pinned baseline to move against. All of
@@ -1366,27 +1366,37 @@ change no output — `compare.mjs` base→a0 reports 260/260, 279/279, 275/275, 
 and every new row `NOT MEASURED on both sides`, which is the correct reading of a baseline that
 predates them).
 
-**Undeclared identifiers, classified** (`undeclaredIdentifiers`, `emitAudits.ts`;
-`undeclared_<key>.jsonl`). *What it proves:* what `preludeFor` has been inventing so that the gcc
-row reads clean. `ccSyntaxCheck` compiles each function up to five times, declaring whatever gcc
-complained about the round before — so every `long rax;` it adds is a variable the emitted C
-**uses and never declares**, and `1072/1072 clean` measures the harness's completion of the
-output. This compiles each function ONCE with `CC_HEADER` and no prelude and classifies every
-`'X' undeclared`: **register** (any width, versioned or not — `REGISTER_NAME` is written out
-rather than imported from `ir.ts`, and `build/readabilityCensus.test.ts` is where the two
-declarations are made to meet in both directions), **minted** (`clobbered_`, `flg_`, `stk_`,
-`__unrecovered_`), **api** (an IAT name or an `apitypes.ts` name used as a value), **other**
-(listed by name). Baseline: register **1452/2438/2260/1409**, minted 6/17/17/6 (`stk_` slots on
-x86, `clobbered_` on x64), api 0, other 2/1/1/2 (all `INVALID_HANDLE_VALUE`), unknown type names
-21/279/276/20 (one distinct, the handle typedef). Those sum to `peek-a-bin-k8i`'s hand-counted
-1460/2456/2278/1417 exactly — k8i counted every undeclared pair; this splits them. *Liveness:*
-`compiled` equals `ccSyntaxCheck.compiled` (the two gcc passes are over one population) and
-`api + unknownTypes > 0` (the prelude is still doing the work it exists for). *Why it does not
-gate:* the register-variables child is expected to take `register + minted` to 0 and gates it
-there; a threshold at today's absolute would go stale with detection. *What it cannot see:*
-`-w` is kept, so an implicit function declaration is silent exactly as in `ccSyntaxCheck` — only
-identifiers used as values reach the list — and a register declared by the emitter but with the
-wrong type is not undeclared.
+**Undeclared identifiers, classified — `register + minted` IS A GATE at 0** (`undeclaredIdentifiers`,
+`emitAudits.ts`; `undeclared_<key>.jsonl`; gated since `peek-a-bin-n9cl.4`). *What it proves:*
+that every register and every emitter-minted variable the emitted C names is declared by the
+emitter — i.e. that `preludeFor` no longer completes the output. `ccSyntaxCheck` compiles each
+function up to five times, declaring whatever gcc complained about the round before — so every
+`long rax;` it adds is a variable the emitted C **uses and never declares**, and `1072/1072 clean`
+measures the harness's completion of the output. This compiles each function ONCE with
+`CC_HEADER` and no prelude and classifies every `'X' undeclared`: **register** (a general-purpose
+register at any width, versioned or not — `REGISTER_NAME` is written out rather than imported from
+`ir.ts`, and `build/readabilityCensus.test.ts` is where the two declarations are made to meet in
+both directions), **residue** (`stk_<addr>`, `tmp_xchg`, `st0..7`, `xmm`/`ymm` — `RESIDUE_NAME`,
+the register-shaped names the emitter deliberately does NOT declare, checked before `minted` so a
+refused name can never sit inside the gate), **minted** (`clobbered_`, `flg_`, `__unrecovered_`),
+**api** (an IAT name or an `apitypes.ts` name used as a value), **other** (listed by name). *What
+a failure means:* a name reached the page that `emit.ts`'s `registerVariables`/`collectDeclarations`
+did not see — a new `IRStmt` kind carrying a register, a mention held as text (the indirect-call
+`(*esi)` shape was the last one), or a declaration spelling that moved; the assertion names the
+first eight `fn@addr name (class)` rows. Measured at `2328657`: register **1460/2443/2265/1417 →
+0/0/0/0**, minted 6/17/17/6 → 0; residue 6/0/0/6 (the PE32 `stk_` slots); api 0; other 2/4/4/2;
+unknown type names 22/281/278/21. **Negative control**, run once: skipping the declaration pass
+returns 1518/2612/2419/1471 register and 0/17/17/0 minted, the gate red naming
+`t32 sub_401A4E@0x401a4e ecx (register)` first (the figure is above the base's 1460 because the
+old `registerText` alias search, which is gone, had been respelling some reads through an assigned
+alias). *Liveness:* `compiled` equals `ccSyntaxCheck.compiled` (the two gcc passes are over one
+population) and `api + unknownTypes > 0` — **`api` is 0 on every binary**, so this holds through
+the `unknown type name` inventions (the handle typedef); a change that declared those types would
+need a new liveness half here, not a weaker one. *What it cannot see:* `-w` is kept, so an implicit
+function declaration is silent exactly as in `ccSyntaxCheck` — only identifiers used as values
+reach the list — and a register declared by the emitter but with the wrong type is not undeclared;
+nor is a *value* defect (the wcslen loop tested `dx` where `edx` was assigned — compilable, wrong,
+and visible here only as two undeclared names).
 
 **Unlifted instructions by base mnemonic** (`unliftedCensus`; `unlifted_<key>.jsonl`). *What it
 proves:* which instructions the emitter admits it has no C for, filed by base mnemonic — a `lock`
@@ -2540,23 +2550,26 @@ because it only widens which reads get *examined*; the verdict is still taken ag
 post-lowering statements. Measured at `82ed61e`: sites 28/159/158/28 → **33/182/181/34**, and the
 gate went red at **12** over correct-looking output.
 
-**The `writes` test asks about the identifier, not the canonical register.** What this audit judges
-is emitted C, and C's unit of identity is the name: `r9` and `r9d` are unrelated variables there —
-which is exactly why `cc -fsyntax-only` is blind to this family, and it cuts both ways. A register
-carrying a 64-bit and a 32-bit live range at once is *correctly* emitted as two names, and against
-a canonical test that correct output reads as a clobber that never happens. One emit rule has to be
-honoured or the name test would narrow: `registerText` re-ties a read of width <= 2 to a wider
-assigned alias, so for those a dominating write of any wider alias is a real clobber.
-
-That test was checked rather than argued, both ways, pinned to `82ed61e`:
+**The `writes` test asks about the identifier — and since `peek-a-bin-n9cl.4` the identifier IS the
+canonical register.** What this audit judges is emitted C, and C's unit of identity is the name.
+While registers were undeclared free variables one per name, `r9` and `r9d` were unrelated
+variables there — which is exactly why `cc -fsyntax-only` is blind to this family — and a register
+carrying a 64-bit and a 32-bit live range at once was *correctly* emitted as two names
+(`peek-a-bin-pzws`); against a canonical test that output read as a clobber that never happens, so
+the test was the name. Checked both ways at `82ed61e`:
 
 | | canonical `writes` | name-level `writes` |
 |---|---|---|
 | before per-live-range naming | 12 | **12** |
 | after per-live-range naming | 12 | **0** |
 
-Neither change alone is sufficient, and the name test provably hides nothing — with the naming fix
-reverted it still reports every one of the twelve rows.
+Now `emit.ts` declares ONE variable per canonical register and spells every alias through it
+(`r9d = …` prints as `r9 = (uint32_t)…`), so a dominating write of ANY alias is a write of the
+identifier the reader sees and the canonical test is the only correct one. Switching it at
+`2328657` + the declarations went red at **6/6 per x64 binary** — the same twelve shapes, now real
+clobbers on the page — and `splitStaleReads` was taught the predecessor attribution above so the
+version-0 rule repairs them (`r9_0 = r9;`): 0 confirmed on all four. The history is kept because
+the direction of the reasoning inverted rather than the facts.
 
 ## Reading the numbers
 
@@ -2706,7 +2719,7 @@ remaining gap and is not implemented.
 | `artifacts/<label>/selfassigns_<key>.jsonl` | Every self-assignment in the emitted C with the instruction it resolved to and the verdict — **including the `identity` rows**, because those are the liveness denominator and a file holding only failures would make a vacuous zero look clean. |
 | `artifacts/<label>/structoverlaps_<key>.jsonl` | Every overlap `candidateFields` had to settle: the base's whole extent list, which reading was kept and which dropped, whether the dropped one was contained, whether the selection was maximal, whether the base was ambiguous, and any narrower same-offset reading that step 1 discarded. Empty file = audit ran and found none. |
 | `artifacts/<label>/undefinedcallees_<key>.jsonl` | Every emitted call to an identifier the output never defines, INTERNAL rows first, each with the caller's extent and whether a `loc_` label names the target. Empty file = audit ran and found none. |
-| `artifacts/<label>/undeclared_<key>.jsonl` | Every (function, identifier) pair gcc reported `undeclared` with NO prelude, classified `register`/`minted`/`api`/`other`. Empty file = audit ran and found none — which is the register-variables child's target. |
+| `artifacts/<label>/undeclared_<key>.jsonl` | Every (function, identifier) pair gcc reported `undeclared` with NO prelude, classified `register`/`residue`/`minted`/`api`/`other`. `register + minted` gates at 0 (`peek-a-bin-n9cl.4`); the file still holds the residue, api and other rows, so an empty file means the emitter declared everything AND the prelude had nothing to invent. |
 | `artifacts/<label>/unlifted_<key>.jsonl` | Every `/* unlifted: … */` site with its base mnemonic and line. Empty file = audit ran and found none. |
 | `artifacts/<label>/duplicates_<key>.jsonl` | Every group of two or more functions with the same normalised body, largest first, with a truncated sample of the body. Empty file = audit ran and found none. |
 | `artifacts/<label>/labels_<key>.jsonl` | One `LabelPruneReport` per function the structuring tap reported on: labels seen, kept because targeted, kept because pinned, kept on both grounds, dropped, duplicates. |

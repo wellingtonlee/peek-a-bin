@@ -881,5 +881,6 @@ export function promoteVars(
     params,
     locals,
     body: finalBody,
+    is64,
   };
 }
