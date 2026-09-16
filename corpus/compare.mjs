@@ -279,6 +279,63 @@ for (const b of bins) {
     note("  arity over-count              NOT MEASURED on both sides (a run predating the audit)");
   }
 
+  // ── The same question over the image's OWN functions (calleeArity.ts). ──
+  //
+  // `apitypes.ts` can only see a callee it declares, so every `sub_` call site
+  // is invisible to the block above — and on x86 that is where the `ret N`
+  // ceiling acts, since an API call goes through an IAT slot that is not a
+  // detected function. The oracle here is the CALLEE's own recovered signature
+  // and the rows are not symmetric, because the arms of `inferSignature` are
+  // not equally strong. `stdcall over` is the `ret N` arm, which is EXACT, so a
+  // row there is an argument the emitter invented — it is GATED at 0 in the run
+  // and a rise is a regression here too. Every other row is judged against a
+  // LOWER bound: `framedParamCount` counts the argument slots the callee's body
+  // happens to touch and `inferSignature64` counts registers read before
+  // written, capped at 4, so `above-scan`/`above-frame` are NOT defects and are
+  // printed without a verdict. `compared` is the liveness half: a fall to zero
+  // is the name resolution having stopped matching, which would take every row
+  // with it and report perfection.
+  if (B.calleeArity && C.calleeArity) {
+    row(
+      "callee arity: stdcall over",
+      (x) => x.calleeArity.stdcallOver,
+      (a, c) => c > a,
+      "AN ARGUMENT INVENTED AT A CALLEE WHOSE `ret N` STATES ITS ARITY",
+    );
+    row(
+      "  stdcall under",
+      (x) => x.calleeArity.stdcallUnder,
+      (a, c) => c > a,
+    );
+    row(
+      "  cdecl under (vs frame count)",
+      (x) => x.calleeArity.cdeclUnder,
+      (a, c) => c > a,
+    );
+    row("  cdecl above frame count", (x) => x.calleeArity.cdeclAboveFrame);
+    row(
+      "  x64 under (vs reg scan)",
+      (x) => x.calleeArity.x64Under,
+      (a, c) => c > a,
+    );
+    row("  x64 above reg scan", (x) => x.calleeArity.x64AboveScan);
+    row("  exact", (x) => x.calleeArity.exact);
+    row(
+      "  ret-N sites (gate liveness)",
+      (x) => x.calleeArity.stdcallSites,
+      (a, c) => c === 0 && a > 0,
+      "THE GATED ROW'S POPULATION IS EMPTY",
+    );
+    row(
+      "  compared (liveness)",
+      (x) => x.calleeArity.compared,
+      (a, c) => c === 0 && a > 0,
+      "THE CALLEE-NAME RESOLUTION STOPPED MATCHING",
+    );
+  } else {
+    note("  callee arity: stdcall over    NOT MEASURED on both sides (a run predating the audit)");
+  }
+
   // ── The DISASSEMBLY panel's parameter count against the DECOMPILE panel's.
   //
   // Two answers the tool gives about the same function, which nothing compared

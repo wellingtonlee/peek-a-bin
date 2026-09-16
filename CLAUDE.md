@@ -1427,6 +1427,16 @@ refused. **Read the long-form entry before changing the code it describes.**
   invisible to gcc, to `corpus/arity.ts` (the callee is a `sub_`) and to `distinct callees lost`.
   One declaration, so the panel stops claiming it too (`signatures produced` 199→197 / 194→192 — a
   **refusal replacing a false claim**, all four sites hand-read).
+- **`corpus/calleeArity.ts` is the arity oracle for the image's OWN functions**, which
+  `corpus/arity.ts` is structurally blind to (its table declares APIs, and an x86 API call goes
+  through an IAT slot that is not a detected function — so the `ret N` ceiling could delete every
+  argument in the corpus without moving a row there). The oracle is the callee's own
+  `FuncRec.sigParams`, classified by the new `FuncRec.sigConvention`, and **only the x86 `stdcall`
+  arm gates at 0**: that arm is `ret N` and is exact, so `over` is an invented argument. Every other
+  arm is a LOWER bound, so its over-direction is `cdecl above frame` / `x64 above reg scan` and is
+  **NOT a defect**. `stdcallSites` is the gate's own liveness half — `compared` is dominated by
+  frame-counted callees, so a run resolving no `ret N` callee would report a perfect 0 over an empty
+  population. The `isCalleeSavedSave` control is **INERT** for this row and is reported as such.
 - **A `push` of a callee-saved register the function has not yet written is a register SAVE** — and
   that, not the register and not the position, is the discriminator. Two rules refuted by this
   corpus: "a push of ebx/esi/edi is a save", and "a save has a matching `pop` before the `ret`".

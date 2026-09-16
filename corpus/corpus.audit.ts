@@ -23,6 +23,7 @@ import { join } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 import { API_TYPES } from "../src/disasm/decompile/apitypes";
 import { type ArityResult, auditApiArity } from "./arity";
+import { auditCalleeArity, type CalleeArityResult } from "./calleeArity";
 import { auditDuplicateBodies, type DuplicateBodiesResult } from "./duplicateBodies";
 import {
   type CcResult,
@@ -65,6 +66,7 @@ const results = new Map<BinKey, BinResult>();
 const ccResults = new Map<BinKey, CcResult>();
 const ozResults = new Map<BinKey, OffsetofResult>();
 const arResults = new Map<BinKey, ArityResult>();
+const caResults = new Map<BinKey, CalleeArityResult>();
 const ucResults = new Map<BinKey, UndefinedCalleeResult>();
 /** What a dereferenced absolute address is called, and what stayed raw. Report-only (peek-a-bin-5b6q.4). */
 const glResults = new Map<BinKey, GlobalsResult>();
@@ -112,6 +114,12 @@ if (!pre.haveBins || !pre.haveCc) {
         // it accepts an implicit declaration at any arity, and `preludeFor`
         // declares every undeclared identifier as its own `long`.
         arResults.set(key, auditApiArity(r.funcs, r.is64));
+        // The same question over the callees `apitypes.ts` cannot see — the
+        // image's own functions — judged against each callee's OWN recovered
+        // signature. The x86 `ret N` arm is exact and gates; every other arm is
+        // a lower bound and only the UNDER direction is a statement. See
+        // `calleeArity.ts` (peek-a-bin-s1f6.2).
+        caResults.set(key, auditCalleeArity(r.funcs, r.is64));
         // Every emitted call whose callee is defined nowhere in the output,
         // split by whether the target is inside the caller's own extent. Report
         // only, in both directions — see `undefinedCallees.ts` on why an
@@ -186,6 +194,18 @@ if (!pre.haveBins || !pre.haveCc) {
         writeFileSync(
           join(artifactDir, `arity_${key}.jsonl`),
           arBad.map((x) => JSON.stringify(x)).join("\n") + (arBad.length > 0 ? "\n" : ""),
+        );
+        // Every emitted call to one of the image's OWN functions whose arity
+        // disagrees with the callee's recovered signature — the invented-
+        // argument rows first. Written even when empty, for `arity_`'s reason.
+        const ca = caResults.get(key) as CalleeArityResult;
+        const caBad = [
+          ...ca.rows.filter((x) => x.klass === "stdcall-over"),
+          ...ca.rows.filter((x) => x.klass !== "stdcall-over"),
+        ];
+        writeFileSync(
+          join(artifactDir, `calleearity_${key}.jsonl`),
+          caBad.map((x) => JSON.stringify(x)).join("\n") + (caBad.length > 0 ? "\n" : ""),
         );
         // Every block whose trailing jcc reads flags the recovered compare does
         // not describe, with the emitted condition where one reached the page.
@@ -400,6 +420,15 @@ if (!pre.haveBins || !pre.haveCc) {
               sigAgree: (() => {
                 const sa = signatureAgreement([{ funcs: r.funcs }]);
                 return { ...sa, rows: sa.rows.length };
+              })(),
+              // CALL ARITY AGAINST THE CALLEE'S OWN SIGNATURE, on the `sub_`
+              // population `apitypes.ts` cannot reach. `stdcallOver` GATES at
+              // 0 — the x86 `ret N` arm is exact, so a row there is an
+              // invented argument; every other row is against a LOWER bound
+              // and is report-only.
+              calleeArity: (() => {
+                const c = caResults.get(key) as CalleeArityResult;
+                return { ...c, rows: c.rows.length };
               })(),
               // A call the reader cannot follow. Per binary because the two
               // halves have different owners and only the INTERNAL one is an
@@ -1768,6 +1797,67 @@ if (!pre.haveBins || !pre.haveCc) {
       }
     });
 
+    /**
+     * THE SAME QUESTION ON THE POPULATION `apitypes.ts` CANNOT REACH.
+     *
+     * `arity.ts`'s oracle is a table of declared Win32 signatures, so every call
+     * to one of the image's own functions is invisible to it — and on x86 that
+     * is exactly where the `ret N` ceiling acts, since an API call goes through
+     * an IAT slot which is not a detected function. This gate is what can see an
+     * invented argument there.
+     *
+     * ONLY THE `stdcall` ROW GATES, and the reason is the oracle's strength and
+     * not its convenience. `sigConvention === "stdcall"` means the count came
+     * from `ret N`, which is exact in both directions; every other arm of
+     * `inferSignature` is a LOWER bound (`framedParamCount` counts the slots the
+     * body happens to touch; `inferSignature64` counts registers read before
+     * written, capped at 4), so `emitted > declared` there is the bound being
+     * low and is REPORTED, never gated. `compared` is the liveness half: callees
+     * are resolved through a NAME map, so a change to how the emitter spells one
+     * would empty this audit silently.
+     */
+    it("invents no argument at a callee whose `ret N` states its arity (gate at 0)", () => {
+      for (const [key, c] of caResults) {
+        expect(`${key}: funcs=${c.funcs > 0} callSites=${c.callSites > 0}`).toBe(
+          `${key}: funcs=true callSites=true`,
+        );
+        // Liveness, and it must be asked per binary: a PE32 image with no
+        // `ret N` callee resolved would report a perfect `stdcallOver` of 0.
+        expect(c.compared).toBeGreaterThan(0);
+        expect(c.withSignature).toBeGreaterThan(0);
+        // THE GATED ROW'S OWN LIVENESS HALF. `compared` is dominated on x86 by
+        // frame-counted callees, whose over-direction cannot be a defect, so a
+        // run that resolved no `ret N` callee at all would report `stdcallOver
+        // 0` over an empty population and read as the healthiest row here.
+        if (results.get(key)?.is64 === false) expect(c.stdcallSites).toBeGreaterThan(0);
+        // The jsonl and the totals cannot disagree about what was measured.
+        expect(
+          c.exact +
+            c.stdcallOver +
+            c.stdcallUnder +
+            c.cdeclUnder +
+            c.x64Under +
+            c.x64AboveScan +
+            c.cdeclAboveFrame,
+        ).toBe(c.compared);
+        expect(c.rows.length).toBe(c.compared - c.exact);
+      }
+      // THE GATE, named per row: an argument at a `ret N` callee that the
+      // machine never passed. `arity.ts`'s OVER verdict, on the 800+ `sub_`
+      // sites that oracle is blind to.
+      const invented = [...caResults.entries()].flatMap(([k, c]) =>
+        c.rows
+          .filter((r) => r.klass === "stdcall-over")
+          .map(
+            (r) =>
+              `${k} ${r.fname} -> ${r.callee} passes ${r.emitted}, ret N says ${r.declared}: ${r.text}`,
+          ),
+      );
+      expect(`arguments invented at a ret-N callee:\n  ${invented.join("\n  ")}`).toBe(
+        "arguments invented at a ret-N callee:\n  ",
+      );
+    });
+
     it("lays every struct field out at the offset its name records", () => {
       for (const [key, r] of ozResults) {
         expect(`${key}: ${r.bad.join("; ")}`).toBe(`${key}: `);
@@ -1880,6 +1970,26 @@ function renderReport(): string {
     L.push("    so it gates at 0 (peek-a-bin-7r1l). UNDER is NOT gated: at the ceiling it is the");
     L.push("    argument evidence running out (4 fastcall registers, 8 scanned pushes), below it");
     L.push("    a recovery the evidence was there for; a rise in either is judged in compare.mjs.");
+    const ca = caResults.get(key) as CalleeArityResult;
+    L.push(
+      `  callee arity vs its own sig  ${ca.exact}/${ca.compared} exact, ` +
+        (r.is64
+          ? `x64 under ${ca.x64Under}, above-scan ${ca.x64AboveScan}`
+          : `stdcall over ${ca.stdcallOver} of ${ca.stdcallSites} ret-N sites (GATED at 0), ` +
+            `stdcall under ${ca.stdcallUnder}, ` +
+            `cdecl under ${ca.cdeclUnder}, above-frame ${ca.cdeclAboveFrame}`) +
+        `  [${ca.callSites} call sites to own functions, ${ca.withSignature} callees with a signature` +
+        (ca.ambiguousNames > 0 ? `, ${ca.ambiguousNames} ambiguous names` : "") +
+        `]`,
+    );
+    L.push("    The 800+ sub_ call sites apitypes.ts cannot see. The oracle is the CALLEE's own");
+    L.push("    recovered signature, and its strength decides the row: `stdcall` is the `ret N`");
+    L.push("    arm and is EXACT, so over is an invented argument and GATES at 0. Every other");
+    L.push("    arm is a LOWER bound — framedParamCount counts touched slots, inferSignature64");
+    L.push("    counts registers read before written (capped at 4) — so above-scan/above-frame");
+    L.push(
+      "    are NOT defects and under is a recovery not made. Sites in calleearity_<bin>.jsonl.",
+    );
     const overBy = ar.byCallee
       .filter((c) => c.over > 0)
       .map((c) => `${c.over} ${c.callee}`)

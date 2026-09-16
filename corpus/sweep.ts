@@ -332,6 +332,18 @@ export interface FuncRec {
    * (`peek-a-bin-j4uk.6`).
    */
   sigParams: number | null;
+  /**
+   * `inferSignature(...).convention` for this function, or `null` where that
+   * function refused.
+   *
+   * Recorded BESIDE `sigParams` because the count means nothing without it:
+   * `stdcall` is the `ret N` arm and is EXACT, `cdecl`/`thiscall`/`fastcall` on
+   * x86 came from `framedParamCount` and are LOWER bounds, and x64 `fastcall`
+   * came from `inferSignature64`'s register scan and is a lower bound capped at
+   * 4. `corpus/calleeArity.ts` is the reader, and it judges a row's direction
+   * entirely from this field (peek-a-bin-s1f6.2).
+   */
+  sigConvention: string | null;
 }
 
 export interface BinResult {
@@ -1006,6 +1018,7 @@ export async function sweepBinary(key: BinKey): Promise<BinResult> {
         // Not "no parameters": `inferSignature` is never asked, because there
         // is nothing to ask it about. `signatureAgreement` excludes the row.
         sigParams: null,
+        sigConvention: null,
       });
       continue;
     }
@@ -1119,6 +1132,7 @@ export async function sweepBinary(key: BinKey): Promise<BinResult> {
       threw,
       code,
       sigParams: signature?.paramCount ?? null,
+      sigConvention: signature?.convention ?? null,
     });
     if (threw !== null) continue;
 

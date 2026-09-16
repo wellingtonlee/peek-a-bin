@@ -684,6 +684,20 @@ only in this one direction. **UNDER is not gated**; see the full section under *
 for both counts, the ceiling split, and the three shapes this defect had. Gated at 0 since
 `peek-a-bin-7r1l` (`peek-a-bin-f51x` and `peek-a-bin-6lmh` cleared the x86 half first).
 
+**Call arity OVER-count at a callee whose own `ret N` states its arity** (`calleeArity.ts`). The
+same question as the row above, on the population `apitypes.ts` is structurally blind to: the
+image's OWN functions. The oracle is the callee's recovered signature, and **only the x86
+`stdcall` arm gates**, because only that arm is a measurement — `ret N` is the argument area's
+size in bytes, exact in both directions since `peek-a-bin-s1f6.2` made it demand that every `ret`
+in the extent agree. *A failure means the emitted C hands one of the image's own functions an
+argument the machine never passed.* Every other arm of `inferSignature` is a LOWER bound
+(`framedParamCount` counts the argument slots the callee's body happens to touch;
+`inferSignature64` counts registers read before written, capped at 4), so the over-direction there
+is reported as `cdecl above frame` / `x64 above reg scan` and is **not a defect**. `stdcallSites`
+is the gate's own liveness half — `compared` is dominated by frame-counted callees on x86, so a
+run resolving no `ret N` callee at all would report a perfect 0 over an empty population. Gated at
+0 since `peek-a-bin-s1f6.2`.
+
 **A register a `pop` wrote, read under its previous value** (`popReads.ts`). **A GATE at 0 on
 both counts**, and it became one the moment a fix got there. Every row it prints is a provably
 wrong name, which always gave it the character of `polarity inverted` rather than of a baseline;
@@ -1158,6 +1172,61 @@ per x64 binary from `over` straight to `exact` with **the under counts and both 
 unchanged**, and t32/w32 byte-identical because `collectArgs64` is the x64 path only. One step
 earlier, base `91cca4f` without `peek-a-bin-6lmh` read 75/105, 90/127, 96/133 and 79/111 exact
 with **over 4/3/3/6**, the x86 half of the same story.
+
+**`arity.ts` CANNOT SEE A CALL TO ONE OF THE IMAGE'S OWN FUNCTIONS, and on x86 that is where the
+`ret N` ceiling acts.** An API call goes through an IAT slot, which is not a detected function, so
+no API call site has a ceiling and this table could not move if the ceiling deleted every argument
+in the corpus. `calleeArity.ts` is the differential that can see it — see below.
+
+**Call arity against the CALLEE'S OWN recovered signature** — `calleeArity.ts`, landed with
+`peek-a-bin-s1f6.2`. Every emitted call to an identifier this binary defines a function for,
+judged against `FuncRec.sigParams` and classified by `FuncRec.sigConvention`, because the arms of
+`inferSignature` are not equally strong. **Measured at `s30-arity-2` on base 5768528:**
+
+| | t32 | t64 | w64 | w32 |
+|---|---|---|---|---|
+| exact / compared | 585/778 | 950/1164 | 896/1095 | 559/730 |
+| call sites to own functions | 1234 | 1164 | 1095 | 1165 |
+| callees carrying a signature | 197 | 279 | 275 | 192 |
+| **stdcall over — GATED at 0** | 0 | — | — | 0 |
+| ret-N sites (gate liveness) | 24 | — | — | 18 |
+| stdcall under | 19 | — | — | 17 |
+| cdecl under | 141 | — | — | 123 |
+| cdecl above frame (not a defect) | 33 | — | — | 31 |
+| x64 under | — | 162 | 152 | — |
+| x64 above reg scan (not a defect) | — | 52 | 47 | — |
+
+**WHAT EACH ROW MEANS, and the asymmetry is the whole audit.** `stdcall` is the `ret N` arm and is
+EXACT, so `over` is an argument that was invented — `arity.ts`'s OVER verdict on a population that
+oracle cannot reach — and `under` is a recovery the lifter did not make. 19 of t32's 24 ret-N
+sites are `under`, and the shape is one thing: `collectArgs32`'s backwards walk requires the
+`push` to be ADJACENT to the call, and MSVC routinely puts the `__thiscall` receiver between them.
+t32 0x4020B0 is the witness — `push esi` / `push [ebp+0x14]` / `lea ecx, [ebp-0x10]` / `call
+sub_401FE5`, where `sub_401FE5` ends `ret 4` and reads `this` out of ECX — so the walk breaks at
+the `lea` and emits `sub_401FE5()`. That is an admitted under-count of the same family as
+`nestedInLaterCallArgs`, not something this bead repaired.
+
+`cdecl`/`thiscall`/`fastcall` counts came from `framedParamCount`, which is `max index + 1` over
+the argument slots the callee's body happens to touch, so a trailing untouched argument is
+invisible to it: only `under` is a statement, and `above frame` is the bound being low. x64 came
+from `inferSignature64`'s register scan, capped at 4: `above reg scan` is the normal case for any
+callee taking five arguments and is **explicitly not a defect**.
+
+**TWO CONTROLS, AND ONE OF THEM IS INERT — reported, not tuned away.**
+
+- **Reverting `peek-a-bin-s1f6.2`'s two halves** (the unanimity refusal in `calleeStackCleanup`
+  and the ceiling in `collectArgs32`) takes `stdcall over` **0 → 4 on t32 and 0 → 4 on w32** and
+  fails the gate, naming all eight rows — `sub_404360` / `sub_4045C0` called with 2 and 3
+  arguments against a `ret N` of 1. So the gated row discriminates, over exactly the population
+  the bead acts on. (In that configuration it is the ORACLE that is wrong rather than the emitter;
+  the audit cannot tell the two apart, which is stated in its docstring.)
+- **Disabling `isCalleeSavedSave`** — the `peek-a-bin-6lmh` shape the bead names as the control —
+  is **INERT for this row**. It takes `arity over` 0 → 4 on t32 and 0 → 6 on w32, i.e. the
+  EXISTING gate fires exactly as `peek-a-bin-6lmh` measured, but `stdcall over` stays 0: the
+  invented prologue-save arguments land at API callees (which `arity.ts` catches) and at
+  frame-counted local callees, where they appear as `cdecl above frame` 33 → 41 / 31 → 39 with
+  `cdecl under` 141 → 138 / 123 → 120. Not one lands at a `ret N` callee. Recorded because a
+  control that does not discriminate is a test that is not testing.
 
 **Part of the drift from the previous table in this file is the AUDIT being fixed, not the
 decompiler, and the two must not be conflated.** `maskLiteralsAndComments` blanked a string
@@ -2911,6 +2980,7 @@ stable-struct-identity epic.
 | `wildBranches.ts` | A filed direct branch whose target the image does not contain. Reads the instruction stream and the PE header; nothing else. |
 | `selfAssigns.ts` | An emitted `X = X;` resolved through the line map to its instruction. Two gates on the instrument (`wrong`, `unresolved`); `openOperand` is reported. |
 | `undefinedCallees.ts` | An emitted `sub_<hex>(` the output defines nowhere, split by whether the target is inside the caller's own extent and, for an internal one, by whether the reader has any thread to the body (`internalLabelled`, `internalThreaded`, `internalUnlabelled`). Reads only emitted text. Report-only in both directions. |
+| `calleeArity.ts` | Call arity at a callee that is one of the image's own functions, judged against that callee's recovered signature. `stdcall over` (the `ret N` arm, exact) GATES at 0 with `stdcallSites` as its liveness half; `stdcall under`, `cdecl under` and `x64 under` are reported; `cdecl above frame` and `x64 above reg scan` are explicitly NOT defects — those counts are lower bounds. Reads emitted text plus `FuncRec.sigParams`/`sigConvention`. |
 | `globals.ts` | What the emitted C calls a dereferenced absolute address (`g_<HEX>`, `__imp_<func>`) and the raw `*(T*)(0x…)` residue, classified against the section table. Reads only emitted text plus `BinResult.sections`. Report-only. |
 | `structOverlaps.ts` | Which of two overlapping readings of one struct base became a field, and whether the sweep's answer is of maximum cardinality. Re-derives both of `candidateFields`' steps from the raw accesses. Report-only in every column; `groups` is the liveness half. |
 | `duplicateBodies.ts` | Emitted functions whose bodies are the same text once `sub_`/`loc_`/`struct_N`/hex and the function's own name are normalised, plus `selfRecursiveThunks` — a header name in `return <name>(` position in its own body. Reads only emitted text. Report-only; the thunk row gates once the thunk child lands. |

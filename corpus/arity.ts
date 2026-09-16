@@ -126,7 +126,7 @@ export function emptyArity(): ArityResult {
  * rather than an underscore so it can never be mistaken for a callee name by
  * the `[A-Za-z_]\w*\s*\(` scan above.
  */
-function maskLiteralsAndComments(code: string): string {
+export function maskLiteralsAndComments(code: string): string {
   const out = code.split("");
   let i = 0;
   const fill = (from: number, to: number, ch: string) => {
@@ -170,7 +170,7 @@ function maskLiteralsAndComments(code: string): string {
  * arity. Nesting is counted, so `f(g(a, b), c)` is two arguments and the inner
  * call is found on its own pass over the line.
  */
-function splitArgs(masked: string, open: number): [number, number][] | null {
+export function splitArgs(masked: string, open: number): [number, number][] | null {
   let depth = 0;
   let start = open + 1;
   const args: [number, number][] = [];
@@ -192,7 +192,7 @@ function splitArgs(masked: string, open: number): [number, number][] | null {
 }
 
 /** An identifier character, for rejecting a match inside a longer name. */
-const isIdent = (c: string | undefined) => c !== undefined && /[A-Za-z0-9_]/.test(c);
+export const isIdent = (c: string | undefined) => c !== undefined && /[A-Za-z0-9_]/.test(c);
 
 /**
  * Every emitted call to a declared API, judged against the declared arity.
