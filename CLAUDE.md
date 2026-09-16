@@ -127,7 +127,7 @@ Reuse them rather than re-rolling the logic.
   relaxation of `stack.ts`'s; `stackFrame.ts` dispatches), `arm64Xref.ts`. Everything x86-shaped —
   decompiler, x86 xrefs, IRP dispatch, signatures — **declines on ARM64 rather than guessing**.
 - **`disasm/decompile/`** — IR lifting → SSA → folding → structuring → cleanup → type inference →
-  promotion → struct synthesis → emission.
+  promotion → struct synthesis → frame-scaffolding deletion (`prologue.ts`) → emission.
 - **`components/`** — the disassembly view is `DisassemblyView.tsx` (orchestration),
   `DisassemblyRows.tsx`, `DisassemblyToolbar.tsx`, `InsnContextMenu.tsx`. All four dialogs go
   through one `Modal.tsx`; its class composition, focus arithmetic and `accidentalDismissAllowed`
@@ -777,9 +777,9 @@ the struct-grouping history, and the measurements behind every rule below.
 
 **Pipeline** (`pipeline.ts`): `buildCFG → liftBlock → liftCrossBlockPops → buildSSA → ssaOptimize →
 destroySSA → foldBlock → structureCFG → cleanupStructured → wrapExceptionRegions → inferTypes →
-promoteVars → synthesizeStructs → emitFunction`. (`wrapExceptionRegions` is local to `pipeline.ts`
-and only runs with `.pdata` exception info. **The docstring at the top of `pipeline.ts` lists a
-shorter, outdated order — trust the code.**)
+promoteVars → synthesizeStructs → stripFrameScaffolding → emitFunction`. (`wrapExceptionRegions` is
+local to `pipeline.ts` and only runs with `.pdata` exception info. **The docstring at the top of
+`pipeline.ts` lists a shorter, outdated order — trust the code.**)
 
 **IR** (`ir.ts`): `IRExpr` (12 kinds) + `IRStmt` (18 kinds including `branch`).
 
@@ -1509,6 +1509,32 @@ refused. **Read the long-form entry before changing the code it describes.**
   path is stale at all. Result: `r9_0 = r9;` at entry, the stores through `r9_0`, exactly one new
   entry copy per affected function (`t64!sub_1400045DC`, `w64!sub_14000496C`), gate back at 0.
   `registerSpeller`'s per-web spelling stays for what it was always evidence of: the **width**.
+
+- **Frame scaffolding is DELETED, never moved, and only where nothing reads it** (`prologue.ts`'s
+  `stripFrameScaffolding`, after `synthesizeStructs` and immediately before `emitFunction`). The
+  standing rule forbids RELOCATING a read of RSP to a program point where RSP differs; a WRITE with
+  zero surviving reads has no denotation left to change, and nothing else in the IR observes RSP —
+  which is why deletion is sound where `copyPropagation`/`fold.ts` must refuse. Six shapes, each a
+  statement identified by the ADDRESS it carries against the instruction stream: the frame
+  establishment (`frameEstablishedAt`), the prologue's `sub/add <sp>, imm` (`StackFrame.spWritesAt`,
+  inside `prologueEnd`), an epilogue restore (`add <sp>, imm` / `lea <sp>, [<fp> ± N]` / `mov <sp>,
+  <fp>` — then only `pop`s, then `ret` or a tail `jmp`), `leave` in that shape, x86's cdecl
+  `add esp, imm` after a `call` (a bounded walk back over non-stack, non-branch instructions — MSVC
+  interleaves), and x86 SEH's `mov esp, [ebp - N]` continuation reload. **The refusals are the
+  soundness argument**: a surviving frame-register read (the register, or any `frameRegisterAliases`
+  variable, anywhere in the body — the /GS `x ^ ebp` mix, an indexed slot) keeps the establishment;
+  a surviving stack-pointer read (the register at any width, a variable `destroySSA` split off a
+  candidate, an `unlifted` line naming it) keeps EVERY stack-pointer candidate, function-wide; a
+  mid-body `sub rsp, rax`/`sub esp, 8` fails the address test and is itself such a read (`alloca`);
+  `leave` also needs `frameDelta !== null`; and the two families settle together to a fixpoint,
+  since `ebp = esp` reads ESP and `esp = ebp` reads EBP. **Placement is load-bearing both ways**:
+  not in the lifter (four readers of the instruction stream) and not before `stackDerivedBases`,
+  which follows the `rbp = rsp` chain to REFUSE a struct over the frame. Statements go whole; the
+  line map loses them (`insns covered` falls by exactly the deletions). GATED by the emitted-text
+  scan `stackPointerScaffolding.writeNoRead === 0`, which knows nothing about the pass; the pass's
+  own account (`frameTap`) reports kept reads by reason, with `gs-xor > 0` on x64 as the control
+  that the cookie read survives. Not deleted, deliberately: `push`/`pop` pairs (SSA already does),
+  home-slot spills (`dropParameterIdentities`), `mov`-based callee-saved save/restore pairs.
 
 ### UI, build and deployment
 

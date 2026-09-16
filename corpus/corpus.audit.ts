@@ -48,6 +48,7 @@ import {
 } from "./emitAudits";
 import { auditGlobals, type GlobalsResult } from "./globals";
 import { type BinKey, corpusDir, corpusDirSource, DOC_BINS, preflight } from "./preflight";
+import { reasonLine, shapeLine } from "./prologueStrip";
 import { type BinResult, sweepBinary } from "./sweep";
 import { auditUndefinedCallees, type UndefinedCalleeResult } from "./undefinedCallees";
 
@@ -347,6 +348,7 @@ if (!pre.haveBins || !pre.haveCc) {
               wildBranches: { ...r.wildBranches, rows: r.wildBranches.rows.length },
               selfAssigns: { ...r.selfAssigns, rows: r.selfAssigns.rows.length },
               frameRepurpose: { ...r.frameRepurpose, rows: r.frameRepurpose.rows.length },
+              prologueStrip: { ...r.prologueStrip, rows: r.prologueStrip.rows.length },
               structOverlaps: { ...r.structOverlaps, rows: r.structOverlaps.rows.length },
               guards: r.guards.length,
               funcs: r.funcs.length,
@@ -1448,14 +1450,49 @@ if (!pre.haveBins || !pre.haveCc) {
       }
     });
 
-    /** Stack-pointer scaffolding. `mentioning` is the liveness half. */
-    it("reads the emitted C for stack-pointer scaffolding (instrument liveness)", () => {
+    /**
+     * Stack-pointer scaffolding. GATED since peek-a-bin-5b6q.1: a function
+     * whose emitted C WRITES the stack pointer and never reads it is a dead
+     * definition `prologue.ts`'s `stripFrameScaffolding` failed to delete, and
+     * the text scan knows nothing about that pass, which is what makes it the
+     * gate. Negative control: skip the pass and 4/18/17/4 (at 6299113) go red.
+     * `mentioning` stays the liveness half — the /GS cookie mix and unnamed
+     * slots keep it non-zero by design.
+     */
+    it("leaves no stack-pointer write the emitted C never reads", () => {
       for (const r of results.values()) {
         const sp = stackPointerScaffolding([{ funcs: r.funcs }]);
         expect(`${r.key}: funcs=${sp.funcs > 0} mentioning=${sp.mentioning > 0}`).toBe(
           `${r.key}: funcs=true mentioning=true`,
         );
-        expect(sp.writeNoRead).toBeLessThanOrEqual(sp.mentioning);
+        // x86 gates from commit (a) of peek-a-bin-5b6q.1; x64 joins in commit
+        // (c), which names the `lea rcx, [rsp + N]` slot addresses and the
+        // `rsp_1` split versions that keep most x64 allocations today.
+        if (r.is64) continue;
+        expect(`${r.key} write-and-never-read: ${sp.rows.join(", ")}`).toBe(
+          `${r.key} write-and-never-read: `,
+        );
+        expect(sp.writeNoRead).toBe(0);
+      }
+    });
+
+    /**
+     * The pass's own account, from the pipeline tap. `framed > 0` per binary
+     * says it saw frames; on the x64 pair the /GS `x ^ rsp` read MUST survive
+     * (15/13 functions at 6299113, kept and named by CLAUDE.md's `/GS` entry),
+     * so `gs-xor > 0` there is the control that the pass never deleted the
+     * cookie mix. x86 mixes the cookie with EBP, so its analogue is the
+     * frame-register half.
+     */
+    it("reports what stripFrameScaffolding kept, and keeps the /GS cookie read", () => {
+      for (const r of results.values()) {
+        const ps = r.prologueStrip;
+        expect(`${r.key}: funcs=${ps.funcs > 0} framed=${ps.framed > 0}`).toBe(
+          `${r.key}: funcs=true framed=true`,
+        );
+        if (r.is64) expect(ps.spReadsKept["gs-xor"]).toBeGreaterThan(0);
+        else expect(ps.fpReadsKept["gs-xor"]).toBeGreaterThan(0);
+        expect(ps.prologueDisagree).toBe(0);
       }
     });
 
@@ -2260,15 +2297,30 @@ function renderReport(): string {
     const sp = stackPointerScaffolding([{ funcs: r.funcs }]);
     L.push(
       `  stack-pointer scaffolding   ${sp.mentioning}/${sp.funcs} functions mention it, ` +
-        `${sp.writeNoRead} write it and never read it; ${sp.reads} reads, ${sp.writes} writes; ` +
+        `${sp.writeNoRead} write it and never read it (GATE 0); ${sp.reads} reads, ${sp.writes} writes; ` +
         `shapes: ${sp.copies} copies, ${sp.subs} -=, ${sp.adds} +=, ${sp.offsets} +0x, ` +
-        `${sp.xors} ^; ${sp.unliftedLeave} unlifted leave — REPORT-ONLY`,
+        `${sp.xors} ^; ${sp.unliftedLeave} unlifted leave` +
+        (sp.rows.length > 0 ? `  [${sp.rows.slice(0, 6).join(", ")}]` : ""),
     );
-    L.push("    Prologue arithmetic, the frame-pointer copy, the /GS cookie and slot addresses,");
-    L.push("    all true and none of them what a reader wants. Sizes epic 2's prologue work;");
-    L.push("    `write and never read` is the candidate gate's report half. `reads` is the raw");
-    L.push("    count a by-reason split (gs-xor, unnamed-slot, alloca) will divide once");
-    L.push("    prologue.ts exists.");
+    L.push("    `write and never read` GATES at 0 since peek-a-bin-5b6q.1: a dead stack-pointer");
+    L.push("    definition `prologue.ts` failed to delete. The other rows are the refusals —");
+    L.push(
+      "    the /GS cookie mix, unnamed slots, alloca — and are REPORT-ONLY; see the line below.",
+    );
+    const ps = r.prologueStrip;
+    L.push(
+      `  frame scaffolding pass      ${ps.framed}/${ps.funcs} framed; candidates ${shapeLine(ps.candidates)}; ` +
+        `deleted ${shapeLine(ps.deleted)}; sp refused in ${ps.spRefused}, fp refused in ${ps.fpRefused}; ` +
+        `${ps.prologueDisagree} prologueDisagree (GATE 0)`,
+    );
+    L.push(`    sp reads kept: ${reasonLine(ps.spReadsKept)}`);
+    L.push(`    fp reads kept: ${reasonLine(ps.fpReadsKept)}`);
+    L.push("    `stripFrameScaffolding`'s own account (the tap, not the text): a statement is");
+    L.push("    deleted only under its refusal — no surviving read of the register family, and an");
+    L.push("    address inside stack.ts's prologue extent, an epilogue shape or a cdecl cleanup.");
+    L.push("    `gs-xor` MUST stay > 0 on x64 (the cookie read is kept by design); a mid-body");
+    L.push("    `sub rsp` reads as `alloca` and keeps everything in its function.");
+    if (ps.rows.length > 0) L.push(`    refused: ${ps.rows.slice(0, 6).join("; ")}`);
     const cp = copyPairs([{ funcs: r.funcs }]);
     L.push(
       `  adjacent copy pairs         ${cp.pairs} (${cp.versionToRegister} the swapDefWithCopy ` +

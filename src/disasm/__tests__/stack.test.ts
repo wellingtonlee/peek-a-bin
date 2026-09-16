@@ -988,3 +988,137 @@ describe("analyzeStackFrame — architecture refusal", () => {
   // the same way and says so at the test; the discriminating differential for
   // the architecture refusal is over a NON-EMPTY x86 body, in both files.
 });
+
+/**
+ * The four prologue facts published for `decompile/prologue.ts`: the extent,
+ * the stack-pointer arithmetic inside it, the home-slot spills and the
+ * stack-pointer aliases. Facts about the WALK, so they travel on the refusal
+ * path too (an x64 leaf under frame-pointer omission has a `sub rsp` and no
+ * frame register).
+ */
+describe("analyzeStackFrame — the prologue extent and its arithmetic", () => {
+  it("ends the extent at the first register write after the frame arithmetic", () => {
+    // push / mov / sub are the arithmetic; `mov eax, …` is the body.
+    const insns = body(
+      ...PROLOGUE_32,
+      ["sub", "esp, 0x10"],
+      ["mov", "eax, dword ptr [ebp + 8]"],
+      ["mov", "dword ptr [ebp - 4], eax"],
+    );
+    const frame = analyzeStackFrame(func(insns.length * 4), insns, "x86", false)!;
+    expect(frame.prologueEnd).toBe(0x100c);
+    expect(frame.spWritesAt).toEqual([0x1008]);
+    expect(frame.homedAt).toEqual([]);
+    expect(frame.spAliases).toEqual([["rbp", -4]]);
+  });
+
+  it("publishes the extent and the sub for an x64 leaf with no frame register", () => {
+    const insns = body(
+      ["sub", "rsp, 0x28"],
+      ["mov", "dword ptr [rsp + 0x20], 1"],
+      ["mov", "eax, dword ptr [rsp + 0x20]"],
+    );
+    const frame = analyzeStackFrame(func(insns.length * 4), insns, "x86", true)!;
+    expect(frame.frameDelta).toBeNull();
+    expect(frame.prologueEnd).toBe(0x1004);
+    expect(frame.spWritesAt).toEqual([0x1000]);
+  });
+
+  it("names the spill that homed an argument, and lets a register spill keep the extent open", () => {
+    // `mov [rsp + 8], rcx` homes argument 0 (it is BEFORE the push, so `[E + 8]`);
+    // `mov [rsp + 0x10], rbx` after the sub is a register save — a store of a
+    // register, so the extent is still open, but nothing extends it either.
+    const insns = body(
+      ["mov", "qword ptr [rsp + 8], rcx"],
+      ["push", "rbx"],
+      ["sub", "rsp, 0x20"],
+      ["mov", "qword ptr [rsp + 0x30], rbx"],
+      ["xor", "eax, eax"],
+    );
+    const frame = analyzeStackFrame(func(insns.length * 4), insns, "x86", true)!;
+    expect(frame.homedAt).toEqual([0x1000]);
+    expect(frame.prologueEnd).toBe(0x100c);
+    expect(frame.spWritesAt).toEqual([0x1008]);
+  });
+
+  it("closes the extent at a store of an immediate, so a later sub is the body's", () => {
+    // `mov [ebp - 4], 1` initialises a local; the `sub esp, 8` after it is a
+    // mid-body allocation and must not be reported as prologue arithmetic.
+    const insns = body(
+      ...PROLOGUE_32,
+      ["sub", "esp, 8"],
+      ["mov", "dword ptr [ebp - 4], 1"],
+      ["sub", "esp, 8"],
+      ["mov", "dword ptr [esp], 5"],
+    );
+    const frame = analyzeStackFrame(func(insns.length * 4), insns, "x86", false)!;
+    expect(frame.prologueEnd).toBe(0x100c);
+    expect(frame.spWritesAt).toEqual([0x1008]);
+  });
+
+  it("leaves a sub after an intervening register write outside the extent", () => {
+    // MSVC's inline C++-EH prologue: `mov eax, fs:[0]` between the pushes and
+    // the `sub`. Refused rather than reasoned about — the sub stays the body's.
+    const insns = body(
+      ...PROLOGUE_32,
+      ["push", "0xffffffff"],
+      ["push", "0x401000"],
+      ["mov", "eax, dword ptr fs:[0]"],
+      ["push", "eax"],
+      ["sub", "esp, 0x10"],
+      ["mov", "dword ptr [ebp - 0x10], ecx"],
+    );
+    const frame = analyzeStackFrame(func(insns.length * 4), insns, "x86", false)!;
+    expect(frame.frameDelta).toBe(4);
+    expect(frame.prologueEnd).toBe(0x1010);
+    expect(frame.spWritesAt).toEqual([]);
+  });
+
+  it("records a stack-pointer alias copy without extending the extent", () => {
+    // MSVC's large-frame shape: `mov rax, rsp` first, the frame off the copy.
+    const insns = body(
+      ["mov", "rax, rsp"],
+      ["push", "rbp"],
+      ["lea", "rbp, [rax - 0x20]"],
+      ["sub", "rsp, 0x100"],
+      ["mov", "rbx, rcx"],
+      ["mov", "qword ptr [rbp - 0x10], rbx"],
+    );
+    const frame = analyzeStackFrame(func(insns.length * 4), insns, "x86", true)!;
+    expect(frame.frameDelta).toBe(0x20);
+    expect(frame.spAliases).toEqual([
+      ["rax", 0],
+      ["rbp", -0x20],
+    ]);
+    expect(frame.prologueEnd).toBe(0x1010);
+    expect(frame.spWritesAt).toEqual([0x100c]);
+  });
+
+  it("publishes no extent for a helper-framed function", () => {
+    // The arithmetic is inside `__SEH_prolog4`; this function's pushes fed the
+    // helper. `prologueEnd` is null exactly as `frameEstablishedAt` is.
+    const HELPER_ADDR = 0x2000;
+    const caller: [string, string][] = [
+      ["push", "0xc"],
+      ["push", "0x411050"],
+      ["call", `0x${HELPER_ADDR.toString(16)}`],
+      ["mov", "ebx, dword ptr [ebp + 0x8]"],
+    ];
+    const helper: [string, string][] = [
+      ["push", "0x401234"],
+      ["push", "dword ptr fs:[0]"],
+      ["mov", "eax, dword ptr [esp + 0x10]"],
+      ["mov", "dword ptr [esp + 0x10], ebp"],
+      ["lea", "ebp, [esp + 0x10]"],
+      ["ret", ""],
+    ];
+    const callerInsns = caller.map(([m, o], i) => insn(0x1000 + i * 4, m, o));
+    const helperInsns = helper.map(([m, o], i) => insn(HELPER_ADDR + i * 4, m, o));
+    const f = func(callerInsns.length * 4);
+    const frame = analyzeStackFrame(f, [...callerInsns, ...helperInsns], "x86", false)!;
+    expect(frame.frameDelta).toBe(4);
+    expect(frame.frameEstablishedAt).toBeNull();
+    expect(frame.prologueEnd).toBeNull();
+    expect(frame.spWritesAt).toEqual([]);
+  });
+});

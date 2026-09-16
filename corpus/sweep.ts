@@ -58,6 +58,7 @@ import { auditLabelOrigins, emptyLabelOrigins, type LabelOriginResult } from "./
 import { auditLostDefs, emptyLostDefs, type LostDefResult } from "./lostDefs";
 import { auditPopReads, emptyPopReads, type PopReadResult } from "./popReads";
 import { type BinKey, binPath, requestedOrder, substitutedTablesDir } from "./preflight";
+import { emptyPrologueStrip, type PrologueStripResult, recordFrameStrip } from "./prologueStrip";
 import { auditSelfAssigns, emptySelfAssigns, type SelfAssignResult } from "./selfAssigns";
 import { auditStaleGuards, emptyStaleGuards, type StaleGuardResult } from "./staleGuards";
 import { auditStaleV0Reads, emptyStaleV0, type StaleV0Result } from "./staleReads";
@@ -724,6 +725,13 @@ export interface BinResult {
    * STRUCTURAL. See `corpus/frameRepurpose.ts`.
    */
   frameRepurpose: FrameRepurposeResult;
+  /**
+   * WHAT `stripFrameScaffolding` DELETED AND WHICH READ REFUSED IT, from the
+   * pipeline's `frameTap`. The instrument beside `stackPointerScaffolding`'s
+   * text gate: the gate says a dead stack-pointer write survived, this says why
+   * the pass kept the ones it kept. See `corpus/prologueStrip.ts`.
+   */
+  prologueStrip: PrologueStripResult;
   structOverlaps: StructOverlapResult;
   /**
    * WHY EACH `loc_` LABEL SURVIVED `pruneLabels`, from the structuring tap.
@@ -966,6 +974,7 @@ export async function sweepBinary(key: BinKey): Promise<BinResult> {
     wildBranches: emptyWildBranches(),
     selfAssigns: emptySelfAssigns(),
     frameRepurpose: emptyFrameRepurpose(),
+    prologueStrip: emptyPrologueStrip(),
     structOverlaps: emptyStructOverlaps(),
     labelOrigins: emptyLabelOrigins(),
     armGotos: { dropped: 0, funcsAffected: 0, funcs: 0 },
@@ -1080,6 +1089,11 @@ export async function sweepBinary(key: BinKey): Promise<BinResult> {
         // The function's own EH4 scope table, as the session computed it for
         // the MCP path — the trylevel annotations are measured from the same map.
         af.seh32Scopes.get(func.address) ?? null,
+        // No user renames in the harness; the slot before `frameTap`.
+        undefined,
+        // What the frame-scaffolding pass deleted and which read refused it.
+        // See `corpus/prologueStrip.ts`.
+        (r) => recordFrameStrip(res.prologueStrip, func.name, r),
       );
       if (r.error !== undefined) {
         // The pipeline caught its own throw. Recorded as `threw` so the row is

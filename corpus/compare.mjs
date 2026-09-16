@@ -1029,11 +1029,19 @@ for (const b of bins) {
     note("  void returning a value        NOT MEASURED on both sides (a run predating the audit)");
   }
 
-  // Stack-pointer scaffolding. Report-only in both directions: the shapes are
-  // printed so a prologue change can be seen to remove the shape it claims to.
+  // Stack-pointer scaffolding. `write and never read` GATES since
+  // peek-a-bin-5b6q.1: a function whose C writes the stack pointer and never
+  // reads it is a dead definition `prologue.ts` failed to delete. The other
+  // rows are report-only in both directions: the shapes are printed so a
+  // prologue change can be seen to remove the shape it claims to and no other.
   if (B.stackPointer && C.stackPointer) {
     row("stack pointer: functions mentioning", (x) => x.stackPointer.mentioning);
-    row("  write and never read", (x) => x.stackPointer.writeNoRead);
+    row(
+      "  write and never read",
+      (x) => x.stackPointer.writeNoRead,
+      (a, c) => c > 0 && c >= a,
+      "A DEAD STACK-POINTER WRITE SURVIVED THE FRAME-SCAFFOLDING PASS",
+    );
     row("  reads (raw rspReadsKept)", (x) => x.stackPointer.reads);
     row("  writes", (x) => x.stackPointer.writes);
     row("  copies (= rsp;)", (x) => x.stackPointer.copies);
@@ -1044,6 +1052,52 @@ for (const b of bins) {
     row("  unlifted leave", (x) => x.stackPointer.unliftedLeave);
   } else {
     note("  stack-pointer scaffolding     NOT MEASURED on both sides (a run predating the audit)");
+  }
+
+  // The frame-scaffolding pass's own account (corpus/prologueStrip.ts). The
+  // deletions are report-only — a fall is a refusal firing, a rise is more
+  // frames named; `framed` and the x64 `gs-xor` count are liveness, and
+  // `prologueDisagree` gates at 0 (a disagreement between UNWIND_INFO and
+  // stack.ts refuses the whole function, and the corpus has none).
+  if (B.prologueStrip && C.prologueStrip) {
+    row(
+      "frame scaffolding: framed",
+      (x) => x.prologueStrip.framed,
+      (a, c) => c === 0 && a > 0,
+      "THE PASS SAW NO FRAME",
+    );
+    for (const k of [
+      "fp-establish",
+      "sp-alloc",
+      "sp-restore",
+      "sp-reload",
+      "leave",
+      "cdecl-cleanup",
+    ]) {
+      row(`  deleted ${k}`, (x) => x.prologueStrip.deleted[k]);
+    }
+    row("  sp refused (functions)", (x) => x.prologueStrip.spRefused);
+    row("  fp refused (functions)", (x) => x.prologueStrip.fpRefused);
+    for (const k of [
+      "gs-xor",
+      "unnamed-slot",
+      "alloca",
+      "sp-copy",
+      "unlifted",
+      "fp-kept",
+      "other",
+    ]) {
+      row(`  sp reads kept: ${k}`, (x) => x.prologueStrip.spReadsKept[k]);
+    }
+    row("  fp reads kept: gs-xor", (x) => x.prologueStrip.fpReadsKept["gs-xor"]);
+    row(
+      "  prologueDisagree",
+      (x) => x.prologueStrip.prologueDisagree,
+      (a, c) => c > a,
+      "UNWIND_INFO AND stack.ts DISAGREE ABOUT A PROLOGUE",
+    );
+  } else {
+    note("  frame scaffolding pass        NOT MEASURED on both sides (a run predating the pass)");
   }
 
   // Adjacent copy pairs. Report-only; a fall is the dead-copy pass landing.

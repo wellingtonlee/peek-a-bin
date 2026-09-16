@@ -41,15 +41,27 @@ function stackVar(over: Partial<StackVar> & { name: string }): StackVar {
  * These fixtures are 64-bit unless they say otherwise, so `D` is 8.
  */
 function frameOf(...vars: StackVar[]): StackFrame {
-  return { frameSize: 0x40, vars, frameDelta: 8, frameEstablishedAt: null };
+  return { ...NO_PROLOGUE, frameSize: 0x40, vars, frameDelta: 8, frameEstablishedAt: null };
 }
+
+/**
+ * The four prologue facts `stack.ts` publishes for `decompile/prologue.ts`.
+ * Nothing in this file reads them — promotion asks only `frameDelta` and
+ * `frameEstablishedAt` — so every fixture carries the empty set.
+ */
+const NO_PROLOGUE: Pick<StackFrame, "prologueEnd" | "spWritesAt" | "homedAt" | "spAliases"> = {
+  prologueEnd: null,
+  spWritesAt: [],
+  homedAt: [],
+  spAliases: [],
+};
 
 /**
  * A frame register `stack.ts` could not derive from the stack pointer —
  * frame-pointer omission, where RBP is an ordinary callee-saved register.
  */
 function unframedFrameOf(...vars: StackVar[]): StackFrame {
-  return { frameSize: 0x40, vars, frameDelta: null, frameEstablishedAt: null };
+  return { ...NO_PROLOGUE, frameSize: 0x40, vars, frameDelta: null, frameEstablishedAt: null };
 }
 
 /**
@@ -59,7 +71,7 @@ function unframedFrameOf(...vars: StackVar[]): StackFrame {
  * (peek-a-bin-ikd, peek-a-bin-sx57).
  */
 function shiftedFrameOf(frameDelta: number, ...vars: StackVar[]): StackFrame {
-  return { frameSize: 0x40, vars, frameDelta, frameEstablishedAt: null };
+  return { ...NO_PROLOGUE, frameSize: 0x40, vars, frameDelta, frameEstablishedAt: null };
 }
 
 /**
@@ -70,7 +82,7 @@ function shiftedFrameOf(frameDelta: number, ...vars: StackVar[]): StackFrame {
  * every other fixture here, so nothing else in this file can reach shape 3.
  */
 function establishedFrameOf(frameEstablishedAt: number, ...vars: StackVar[]): StackFrame {
-  return { frameSize: 0x40, vars, frameDelta: 8, frameEstablishedAt };
+  return { ...NO_PROLOGUE, frameSize: 0x40, vars, frameDelta: 8, frameEstablishedAt };
 }
 
 /** `[rbp - offset]` — a local slot. */
@@ -543,6 +555,7 @@ describe("promoteVars — frame-register aliases", () => {
       [assignAt(irVar("rbp_1", 8), src, EST), assign(irReg("eax", 4), viaVar("rbp_1", "-", 0x20))],
       {
         frame: {
+          ...NO_PROLOGUE,
           frameSize: 0x40,
           vars: [stackVar({ name: "var_20", offset: 0x20, key: stackVarKey("bp", -0x20) })],
           frameDelta: 0x488,
@@ -581,6 +594,7 @@ describe("promoteVars — frame-register aliases", () => {
       [assignAt(irVar("rbp_1", 8), irReg("rsp", 8), EST), assign(irReg("eax", 4), access)],
       {
         frame: {
+          ...NO_PROLOGUE,
           frameSize: 0x40,
           vars: [stackVar({ name: "arg_0x10", offset: 0x10, key: stackVarKey("bp", 0x10) })],
           frameDelta: null,

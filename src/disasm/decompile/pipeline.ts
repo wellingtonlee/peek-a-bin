@@ -14,6 +14,7 @@ import { blockLiveOut, foldBlock } from "./fold";
 import { bodiesOf, type IRBranch, type IRExpr, type IRStmt, type IRTry, rewriteBodies } from "./ir";
 import { firstCalleeSavedWrites, liftBlock, liftCrossBlockPops, matchedStackSlots } from "./lifter";
 import type { NamingContext } from "./naming";
+import { type FrameStripReport, stripFrameScaffolding } from "./prologue";
 import { applyUserNames, promoteVars } from "./promote";
 import { RegState } from "./regstate";
 import { buildSSA, detectNaturalLoops } from "./ssa";
@@ -186,6 +187,12 @@ export function decompileFunction(
    * every parameter since `tap` follows (peek-a-bin-5b6q.7).
    */
   userNames?: Readonly<Record<string, string>>,
+  /**
+   * An instrument watching `stripFrameScaffolding` — what it found, what it
+   * deleted and which read refused it. `corpus/sweep.ts` is the only caller.
+   * Last, after `userNames`, for the reason every parameter since `tap` is last.
+   */
+  frameTap?: (r: FrameStripReport) => void,
 ): DecompileResult {
   try {
     // 1. Build CFG + detect loops
@@ -414,6 +421,18 @@ export function decompileFunction(
     if (userNames) {
       irFunc = applyUserNames(irFunc, userNames, typeCtx);
     }
+    // 8b. Delete the frame scaffolding nothing reads — AFTER struct synthesis,
+    // whose `stackDerivedBases` follows the `rbp = rsp` chain to refuse a
+    // struct over the frame, and BEFORE emission. The epilogue grammar is read
+    // off the instruction stream the CFG was built from. See `prologue.ts`.
+    irFunc = stripFrameScaffolding(
+      irFunc,
+      blocks.flatMap((b) => b.insns).sort((a, b) => a.address - b.address),
+      func,
+      stackFrame,
+      is64,
+      frameTap,
+    );
 
     // 9. Emit C text + lineMap
     //

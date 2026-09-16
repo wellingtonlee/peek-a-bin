@@ -949,6 +949,30 @@ never a frame pointer. That is `633s`'s "`frameDelta` is the wrong lever" paragr
 class; measured, 1 such function per binary, whose RBP is a scratch byte register
 (`t64!sub_140003B44`'s `setne bpl` / `lea eax, [rbp - 1]`).
 
+**A stack-pointer write the emitted C never reads** (`stackPointerScaffolding.writeNoRead` in
+`emitAudits.ts`; the instrument beside it is `prologueStrip.ts`). *A failure means a dead
+definition of RSP/ESP reached the page* — `rsp -= 0x28`, `esp += 0xC`, `esp = var_18` — that
+`decompile/prologue.ts`'s `stripFrameScaffolding` should have deleted and did not: every such
+write is a candidate under one of its six address-tested shapes or a shape the pass has not been
+taught, and either way a reader is shown scaffolding. The gate reads the EMITTED TEXT and knows
+nothing about the pass, which is what makes it a gate rather than the pass grading itself; the
+pass's own account rides on `decompileFunction`'s `frameTap` and is summed as `frame scaffolding
+pass`: candidates and deletions by shape (`fp-establish`, `sp-alloc`, `sp-restore`, `sp-reload`,
+`leave`, `cdecl-cleanup`) and the reads that refused a deletion by reason (`gs-xor`,
+`unnamed-slot`, `alloca`, `sp-copy`, `unlifted`, `fp-kept`, `sp-kept`, `other`). *Liveness:*
+`framed > 0` per binary (the pass saw frames — 204/20/18/201), and **`gs-xor > 0` on the x64
+pair** (15/13 functions: the /GS `x ^ rsp` read MUST survive by CLAUDE.md's `/GS` entry, so a pass
+that deleted the cookie mix reads 0 here before `staleGuards` could notice; x86 mixes the cookie
+with EBP, so its analogue is the frame-register half, 18/16). `prologueDisagree` gates at 0 beside
+it (commit b of peek-a-bin-5b6q.1: an x64 `UNWIND_INFO` that contradicts `stack.ts`'s prologue
+refuses the whole function). *Negative controls:* skipping the pass reddens the gate on all four
+binaries (4/18/17/4 at 6299113); dropping the function-wide read check reddens `pipeline.test.ts`'s
+"a mid-body sub esp stays and keeps the prologue". *What it cannot see:* a write that IS read —
+the refusals are the report rows, and a rise in `mentioning` is read against them; and whether the
+C that remains is right, which is polarity's and the gcc gate's to say. **Gated on x86 from
+commit a; x64 joins at commit c**, whose `&var` spelling and `rsp_1` aliasing are what take the
+x64 row 18/17 → 0/0.
+
 ### Baselines — reported, never gated
 
 **Line map coverage**, per instruction and per CFG block. Read the name literally: it measures
@@ -1462,15 +1486,16 @@ trailing `return;`. *Why it does not gate:* the return-type child gates it at 0.
 **Stack-pointer scaffolding** (`stackPointerScaffolding`). *What it proves:* how much of the
 emitted C is the stack pointer talking to itself, by shape, and how many functions adjust it and
 never read it back. A write is a token followed by `=`, `-=` or `+=` (not `==`); everything else
-is a read; `rsp_1` is still the stack pointer. Baseline: 181/99/96/180 of 260/279/275/258
-functions mention it (556 — the plan's 523 came from a narrower regex); write-and-never-read
-4/18/17/4; shapes `= rsp;` 178/36/34/177, `-=` 17/56/55/15, `+=` 66/0/0/61, `+ 0x` 4/79/72/4,
-`^` 1/17/15/1 (the plan's 25/21 `^ rsp` counted the `x = y ^ rsp` spelling and the `^=` one
-together; this row now counts both); unlifted `leave` 73/0/0/72; raw reads 210/693/525/209 — the
-`rspReadsKept` figure a by-reason split (gs-xor, unnamed-slot, alloca) will divide once
-`prologue.ts` exists. *Liveness:* `mentioning > 0`. *Why it does not gate:* a stack-pointer
-mention is a true statement about the machine; `writeNoRead` is the report half of a gate that
-epic 2 may earn.
+is a read; `rsp_1` is still the stack pointer. Baseline at 6299113: 181/99/96/180 of
+260/279/275/258 functions mention it (556 — the plan's 523 came from a narrower regex);
+write-and-never-read 4/18/17/4; shapes `= rsp;` 178/36/34/177, `-=` 17/56/55/15, `+=` 66/0/0/61,
+`+ 0x` 4/79/72/4, `^` 1/17/15/1 (the plan's 25/21 `^ rsp` counted the `x = y ^ rsp` spelling and
+the `^=` one together; this row now counts both); unlifted `leave` 73/0/0/72; raw reads
+210/693/525/209. **`writeNoRead` GATES at 0 since peek-a-bin-5b6q.1** — see the gate entry above
+— and the by-reason split lives beside it as `frame scaffolding pass` (`prologueStrip.ts`).
+*Liveness:* `mentioning > 0` (the /GS cookie mix and unnamed slots keep it non-zero by design).
+*What the other rows are:* refusals, and report-only — a stack-pointer mention is a true statement
+about the machine.
 
 **Adjacent copy pairs** (`copyPairs`). *What it proves:* `v = X;` immediately followed by
 `r = v;` — the shape `ssadestroy.ts`'s `swapDefWithCopy` leaves on purpose (appending the copy

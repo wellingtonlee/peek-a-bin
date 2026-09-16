@@ -127,6 +127,48 @@ export interface StackFrame {
    * address that would match one.
    */
   frameEstablishedAt: number | null;
+  /**
+   * One past the last PROLOGUE instruction that moved the stack pointer or
+   * established the frame register — the `push`es, the `sub <sp>, imm` and the
+   * `mov`/`lea <fp>, <sp>` that `inlineFrameGeometry` read as frame arithmetic,
+   * before anything else wrote a register. `null` when no such instruction was
+   * read (a function that opens with a real register write, the helper-framed
+   * `__SEH_prolog4` shape, or every refusal above).
+   *
+   * THE PROLOGUE EXTENT, for `decompile/prologue.ts`: a stack-pointer write at an
+   * address below this is allocation scaffolding and a candidate for deletion
+   * under that pass's refusals; one at or above it is the body's own (an
+   * `alloca`, a `__chkstk` shape) and is never touched. Spill stores after the
+   * arithmetic deliberately do not extend it, so the extent stays comparable
+   * with what an x64 `UNWIND_INFO` calls the prolog (`RuntimeFunction.x64Prolog`).
+   *
+   * `null` and `undefined` must read the same way, for `frameDelta`'s reason.
+   */
+  prologueEnd: number | null;
+  /**
+   * The addresses of the prologue's `sub`/`add <sp>, imm` instructions — every
+   * write of the stack pointer inside the extent above. Published so a consumer
+   * can recognise the statement a `sub rsp, 0x30` lifted to AFTER `destroySSA`
+   * has swapped its destination for a variable (`rsp_1 = rsp - 0x30`): the
+   * address is the only thing that survives that swap, exactly as
+   * `frameEstablishedAt` is for the frame register. Empty when there are none.
+   */
+  spWritesAt: number[];
+  /**
+   * The addresses of the prologue stores that filled a home slot with its own
+   * argument register — the instructions behind `homed` in
+   * `inlineFrameGeometry`. Empty on x86 (no home space) and for every function
+   * that spilled nothing.
+   */
+  homedAt: number[];
+  /**
+   * Registers holding an earlier stack-pointer value when the prologue walk
+   * ended, canonical name → `<sp> - E` (the value's offset from the stack
+   * pointer on entry): MSVC's `mov rax, rsp` / `mov r11, rsp` ahead of a large
+   * frame's pushes, and the frame register itself once established. Pairs
+   * rather than a `Map`, since a `StackFrame` is JSON on the MCP surface.
+   */
+  spAliases: [string, number][];
 }
 
 export interface DataItem {

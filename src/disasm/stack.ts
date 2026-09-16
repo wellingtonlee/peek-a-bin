@@ -147,13 +147,40 @@ interface FrameGeometry {
    * write of the frame register ends the spill scan and leaves both alone.
    */
   establishedAt: number | null;
+  /**
+   * The prologue's extent and its stack-pointer arithmetic — see
+   * `StackFrame.prologueEnd`, `spWritesAt`, `homedAt` and `spAliases`, which
+   * these four are published as verbatim. They are facts about the WALK rather
+   * than about the frame register, so they are filled in on the refusal path
+   * too: an x64 function under frame-pointer omission has no `delta` and still
+   * has a `sub rsp, 0x28` whose address `decompile/prologue.ts` needs.
+   */
+  prologue: PrologueFacts;
+}
+
+/** The part of `FrameGeometry` that exists whether or not a frame register does. */
+interface PrologueFacts {
+  end: number | null;
+  spWritesAt: number[];
+  homedAt: number[];
+  spAliases: [string, number][];
 }
 
 /** No home slot was shown to hold its argument. */
 const NO_HOMED: ReadonlySet<number> = new Set<number>();
 
-/** The frame register is not derived from the stack pointer in this function. */
-const REFUSED: FrameGeometry = { delta: null, homed: NO_HOMED, establishedAt: null };
+/** Nothing was read: no extent, no arithmetic, no spill, no alias. */
+function noPrologue(): PrologueFacts {
+  return { end: null, spWritesAt: [], homedAt: [], spAliases: [] };
+}
+
+/**
+ * The frame register is not derived from the stack pointer in this function.
+ * The prologue facts still travel — see `FrameGeometry.prologue`.
+ */
+function refused(prologue: PrologueFacts): FrameGeometry {
+  return { delta: null, homed: NO_HOMED, establishedAt: null, prologue };
+}
 
 /**
  * A memory operand as Capstone spells it, with the size prefix removed:
@@ -317,6 +344,27 @@ function inlineFrameGeometry(insns: Instruction[], is64: boolean): FrameGeometry
   /** No register but `<sp>` and `<fp>` has been written — see the docstring. */
   let argsPristine = true;
   const homed = new Set<number>();
+  /**
+   * The prologue extent and its arithmetic — `StackFrame.prologueEnd` and
+   * friends. `end` advances past each `push`, `sub`/`add <sp>` and frame
+   * establishment while `argsPristine` still holds, i.e. before any other
+   * register has been written: MSVC's inline C++-EH prologue writes EAX
+   * (`mov eax, fs:[0]`) between its pushes and its `sub esp`, and that `sub`
+   * is deliberately left OUTSIDE the extent rather than reasoned about. A
+   * spill store advances nothing (see the field's docstring), and neither
+   * does an alias copy such as `mov rax, rsp`, which the unwind data's
+   * `SizeOfProlog` does not count either.
+   */
+  const prologue = noPrologue();
+  /** `end` is frozen the moment the walk sees anything but frame arithmetic. */
+  let extentOpen = true;
+  const extend = (insn: Instruction): void => {
+    if (extentOpen) prologue.end = insn.address + insn.size;
+  };
+  const stopHere = (): FrameGeometry => {
+    prologue.spAliases = [...spAlias.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+    return stop(delta, homed, establishedAt, prologue);
+  };
 
   for (let i = 0; i < insns.length && i < FRAME_MAX_INSNS; i++) {
     const insn = insns[i];
@@ -329,8 +377,9 @@ function inlineFrameGeometry(insns: Instruction[], is64: boolean): FrameGeometry
     const memDest = dest.includes("[");
 
     if (mn === "push") {
-      if (!pushesWholeSlot(dest, slotSize)) return stop(delta, homed, establishedAt);
+      if (!pushesWholeSlot(dest, slotSize)) return stopHere();
       spDelta -= slotSize;
+      extend(insn);
       continue;
     }
 
@@ -343,8 +392,8 @@ function inlineFrameGeometry(insns: Instruction[], is64: boolean): FrameGeometry
       // scan ends there while `delta` — already fixed, and what every caller
       // before this bead received at exactly this point — is handed back
       // untouched.
-      if (delta !== null) return { delta, homed, establishedAt };
-      if (dest !== fp) return REFUSED; // a narrower write is not a frame pointer
+      if (delta !== null) return stopHere();
+      if (dest !== fp) return refused(prologue); // a narrower write is not a frame pointer
       if (mn === "mov" || mn === "lea") {
         const v = entryRelative(ops[1] ?? "", sp, spDelta, spAlias, mn === "lea");
         if (v !== null) {
@@ -358,30 +407,33 @@ function inlineFrameGeometry(insns: Instruction[], is64: boolean): FrameGeometry
           delta = v === 0 ? 0 : -v;
           establishedAt = insn.address;
           spAlias.set(fpCanon, v);
+          extend(insn);
           continue;
         }
       }
-      return REFUSED;
+      return refused(prologue);
     }
 
     if (!memDest && isKnownRegister(dest) && canonReg(dest) === spCanon) {
       // `sub <sp>, imm` and `add <sp>, imm` are the frame arithmetic; anything
       // else that moves the stack pointer ends the model.
       const imm = dest === sp ? loneImmediate(ops[1] ?? "") : null;
-      if (imm === null) return stop(delta, homed, establishedAt);
+      if (imm === null) return stopHere();
       if (mn === "sub") spDelta -= imm;
       else if (mn === "add") spDelta += imm;
-      else return stop(delta, homed, establishedAt);
+      else return stopHere();
+      if (extentOpen) prologue.spWritesAt.push(insn.address);
+      extend(insn);
       continue;
     }
 
     // `xchg` writes BOTH of its operands, so it is not enough to look at the
     // destination — the same reason `fpSurvivesToReturn` special-cases it.
     if (mn === "xchg" && ops.some((o) => isKnownRegister(o) && canonReg(o) === fpCanon)) {
-      return stop(delta, homed, establishedAt);
+      return stopHere();
     }
 
-    if (STACK_TRAFFIC.has(mn) || mn.startsWith("j")) return stop(delta, homed, establishedAt);
+    if (STACK_TRAFFIC.has(mn) || mn.startsWith("j")) return stopHere();
 
     if (memDest) {
       // A store: it writes memory and no register, so it neither advances the
@@ -389,11 +441,18 @@ function inlineFrameGeometry(insns: Instruction[], is64: boolean): FrameGeometry
       // only form that can be an argument spill, and it is also the only one
       // that provably writes no register: `xchg`, `xadd` and `cmpxchg` through
       // a memory operand write theirs, which `argsPristine` cannot survive.
+      // A store whose source is not a register closes the extent: the prologue
+      // stores registers (saves, home-slot spills); `mov [ebp - 4], 1` is the
+      // body initialising a local, and a `sub esp` after it is the body's own.
+      if (mn !== "mov" || !isKnownRegister(ops[1] ?? "")) extentOpen = false;
       if (mn !== "mov") argsPristine = false;
       else if (argsPristine) {
         const target = entryRelative(dest.replace(MEM_SIZE_PREFIX, ""), sp, spDelta, spAlias, true);
         const slot = homedSlot(target, ops[1] ?? "", slotSize, homeRegs);
-        if (slot !== null) homed.add(slot);
+        if (slot !== null) {
+          homed.add(slot);
+          prologue.homedAt.push(insn.address);
+        }
       }
       continue;
     }
@@ -404,15 +463,20 @@ function inlineFrameGeometry(insns: Instruction[], is64: boolean): FrameGeometry
       spAlias.delete(canonReg(dest));
       if (mn === "mov" && ops[1] === sp && regSize(dest) === slotSize) {
         spAlias.set(canonReg(dest), spDelta);
+      } else {
+        // A register write that is not an alias copy: the frame arithmetic is
+        // over, whatever the walk goes on to read for `homed`.
+        extentOpen = false;
       }
       argsPristine = false;
     } else {
       // An instruction whose written registers this walk cannot name — `cdq`
       // writes EDX, `mul` writes RDX:RAX — so nothing after it is a spill.
       argsPristine = false;
+      extentOpen = false;
     }
   }
-  return stop(delta, homed, establishedAt);
+  return stopHere();
 }
 
 /**
@@ -424,8 +488,9 @@ function stop(
   delta: number | null,
   homed: ReadonlySet<number>,
   establishedAt: number | null,
+  prologue: PrologueFacts,
 ): FrameGeometry {
-  return delta === null ? REFUSED : { delta, homed, establishedAt };
+  return delta === null ? refused(prologue) : { delta, homed, establishedAt, prologue };
 }
 
 /**
@@ -642,9 +707,19 @@ function frameGeometry(
 ): FrameGeometry {
   const inline = inlineFrameGeometry(insns, is64);
   if (inline.delta !== null) return inline;
+  // The helper path reports NO prologue extent either: the arithmetic is inside
+  // `__SEH_prolog4`, and this function's own `push <imm>; push <imm>; call`
+  // moved the stack pointer only to feed the helper. The inline walk's
+  // extent — which would end at the `call` — is deliberately not reused,
+  // since a candidate it named would be the helper's argument, not scaffolding.
   return hasHelperFramePointerPrologue(insns, instructions, is64)
-    ? { delta: ARG_AREA[is64 ? 64 : 32].slotSize, homed: NO_HOMED, establishedAt: null }
-    : REFUSED;
+    ? {
+        delta: ARG_AREA[is64 ? 64 : 32].slotSize,
+        homed: NO_HOMED,
+        establishedAt: null,
+        prologue: noPrologue(),
+      }
+    : inline;
 }
 
 /**
@@ -1066,7 +1141,16 @@ export function analyzeStackFrame(
     });
   }
 
-  return { frameSize, vars, frameDelta, frameEstablishedAt: geometry.establishedAt };
+  return {
+    frameSize,
+    vars,
+    frameDelta,
+    frameEstablishedAt: geometry.establishedAt,
+    prologueEnd: geometry.prologue.end,
+    spWritesAt: geometry.prologue.spWritesAt,
+    homedAt: geometry.prologue.homedAt,
+    spAliases: geometry.prologue.spAliases,
+  };
 }
 
 /** Stable identity for a stack slot: base register + signed operand offset. */

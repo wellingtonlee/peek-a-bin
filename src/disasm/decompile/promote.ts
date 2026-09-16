@@ -320,7 +320,7 @@ interface StackAccess {
  *    instruction is inside `__SEH_prolog4` and this function's stream has no
  *    statement at that address to match.
  */
-function frameRegisterAliases(
+export function frameRegisterAliases(
   body: IRStmt[],
   is64: boolean,
   frameDelta: number | null,

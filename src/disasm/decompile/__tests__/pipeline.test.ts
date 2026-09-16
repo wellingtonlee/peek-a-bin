@@ -10027,3 +10027,313 @@ describe("pfn_ globals — a stored GetProcAddress result reaches the page by na
     expect(code).toContain("g_1400163D0");
   });
 });
+
+/**
+ * `prologue.ts`'s `stripFrameScaffolding` — the frame scaffolding nothing reads
+ * is deleted, and each refusal keeps it. Every fixture runs with the
+ * `StackFrame` the real caller computes, because the pass reads its prologue
+ * extent (`spWritesAt`, `frameEstablishedAt`) off that record; a `null` frame
+ * names no candidate but the epilogue's.
+ */
+describe("decompileFunction — frame scaffolding is deleted only where nothing reads it", () => {
+  function runStrip(
+    instructions: Instruction[],
+    is64 = false,
+  ): { code: string; report: import("../prologue").FrameStripReport | null } {
+    const last = instructions[instructions.length - 1];
+    const func: DisasmFunction = {
+      name: "sub_401000",
+      address: instructions[0].address,
+      size: last.address + last.size - instructions[0].address,
+    };
+    let report: import("../prologue").FrameStripReport | null = null;
+    const r = decompileFunction(
+      func,
+      instructions,
+      new Map<number, Xref[]>(),
+      analyzeStackFrame(func, instructions, "x86", is64),
+      null,
+      is64,
+      new Map(),
+      new Map(),
+      new Map(),
+      new Map(),
+      new StructRegistry(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      (rep) => {
+        report = rep;
+      },
+    );
+    return { code: r.code, report };
+  }
+
+  /** The body without its declaration block, for MENTION counts. */
+  const mentions = (code: string, re: RegExp): number =>
+    (withoutDeclarations(code).match(re) ?? []).length;
+
+  it("a prologue the frame fully names is not printed", () => {
+    // t32's canonical shape: push/mov/sub, one named local, `leave; ret`.
+    const { code, report } = runStrip(
+      seq(0x401000, [
+        ["push", "ebp"],
+        ["mov", "ebp, esp"],
+        ["sub", "esp, 8"],
+        ["mov", "dword ptr [ebp - 4], 1"],
+        ["mov", "eax, dword ptr [ebp - 4]"],
+        ["leave"],
+        ["ret"],
+      ]),
+    );
+    expect(code).toContain("var_4 = 1;");
+    expect(code).toContain("return var_4;");
+    expect(mentions(code, /\besp\b/g)).toBe(0);
+    expect(mentions(code, /\bebp\b/g)).toBe(0);
+    expect(code).not.toContain("unlifted: leave");
+    // The declaration block follows the body: no register left to declare.
+    expect(code).not.toMatch(/int32_t e[sb]p;/);
+    expect(report?.deleted).toEqual({
+      "fp-establish": 1,
+      "sp-alloc": 0, // `sub esp, 8` was already dead in SSA — nothing read it
+      "sp-restore": 0,
+      "sp-reload": 0,
+      leave: 1,
+      "cdecl-cleanup": 0,
+    });
+  });
+
+  it("deletes the mov esp, ebp / pop ebp epilogue the same way", () => {
+    const { code } = runStrip(
+      seq(0x401000, [
+        ["push", "ebp"],
+        ["mov", "ebp, esp"],
+        ["sub", "esp, 8"],
+        ["mov", "dword ptr [ebp - 4], 1"],
+        ["mov", "eax, dword ptr [ebp - 4]"],
+        ["mov", "esp, ebp"],
+        ["pop", "ebp"],
+        ["ret"],
+      ]),
+    );
+    expect(code).toContain("return var_4;");
+    expect(mentions(code, /\be[sb]p\b/g)).toBe(0);
+  });
+
+  it("a mid-body sub esp stays and keeps the prologue", () => {
+    // `sub esp, 8; mov [esp], 5` mid-body is an allocation the address test
+    // refuses (the extent closed at `mov [ebp - 4], 1`, a store of an
+    // immediate); it and its store read ESP, so the prologue's `sub esp, 8` is
+    // kept too. The establishment still goes — nothing reads EBP — which is
+    // the two families being decided separately. NEGATIVE CONTROL for the
+    // function-wide read check: drop it and this test reddens.
+    const { code, report } = runStrip(
+      seq(0x401000, [
+        ["push", "ebp"],
+        ["mov", "ebp, esp"],
+        ["sub", "esp, 8"],
+        ["mov", "dword ptr [ebp - 4], 1"],
+        ["sub", "esp, 8"],
+        ["mov", "dword ptr [esp], 5"],
+        ["call", "0x402000"],
+        ["mov", "eax, dword ptr [ebp - 4]"],
+        ["mov", "esp, ebp"],
+        ["pop", "ebp"],
+        ["ret"],
+      ]),
+    );
+    expect(mentions(code, /\besp -= 8;/g)).toBe(2);
+    expect(code).toContain("*(int32_t*)(esp) = 5;");
+    expect(code).not.toContain("ebp = esp;");
+    expect(report?.candidates["sp-alloc"]).toBe(1); // the prologue's alone
+    expect(report?.spReadsKept).toEqual(["alloca", "unnamed-slot"]);
+    expect(report?.deleted["sp-alloc"]).toBe(0);
+    expect(report?.deleted["fp-establish"]).toBe(1);
+  });
+
+  it("a frame-register read the frame could not name keeps ebp = esp", () => {
+    // An indexed slot: `matchStackAccess` refuses it, so `ebp` is read in the
+    // body and the establishment stays — and with it, its read of ESP keeps
+    // the allocation (reported as `fp-kept`).
+    const { code, report } = runStrip(
+      seq(0x401000, [
+        ["push", "ebp"],
+        ["mov", "ebp, esp"],
+        ["sub", "esp, 0x10"],
+        ["mov", "dword ptr [ebp - 0x10], 1"],
+        ["mov", "eax, dword ptr [ebp + ecx*4 - 0x10]"],
+        ["leave"],
+        ["ret"],
+      ]),
+    );
+    expect(code).toContain("ebp = esp;");
+    expect(code).toMatch(/\*\(int32_t\*\)\(ebp \+ \(ecx << 2\) - 0x10\)/);
+    expect(report?.fpReadsKept).toEqual(["unnamed-slot"]);
+    expect(report?.spReadsKept).toEqual(["fp-kept"]);
+    // `leave` is in an epilogue shape under a recovered frame, so it goes
+    // regardless — its writes are dead by construction.
+    expect(code).not.toContain("unlifted: leave");
+  });
+
+  it("a leave outside an epilogue shape stays", () => {
+    // `leave` followed by an instruction that is neither a pop nor a return is
+    // not the epilogue grammar; the pass has no evidence about it and leaves
+    // the admission on the page.
+    const { code, report } = runStrip(
+      seq(0x401000, [
+        ["push", "ebp"],
+        ["mov", "ebp, esp"],
+        ["sub", "esp, 8"],
+        ["mov", "dword ptr [ebp - 4], 1"],
+        ["mov", "eax, dword ptr [ebp - 4]"],
+        ["leave"],
+        ["mov", "ecx, 1"],
+        ["ret"],
+      ]),
+    );
+    expect(code).toContain("/* unlifted: leave */;");
+    expect(report?.candidates.leave).toBe(0);
+  });
+
+  it("a leave under no recovered frame stays", () => {
+    // No `sub`, no slot: `analyzeStackFrame` returns null and `frameDelta` is
+    // null, so refusal 4 keeps the `leave` even in the epilogue shape.
+    const { code } = runStrip(
+      seq(0x401000, [["push", "ebp"], ["mov", "ebp, esp"], ["leave"], ["ret"]]),
+    );
+    expect(code).toContain("/* unlifted: leave */;");
+  });
+
+  it("/GS: the cookie xor's frame-register read keeps ebp = esp and the allocation", () => {
+    // x86 mixes the cookie with EBP. The xor is real control flow (CLAUDE.md's
+    // /GS entry) and its read refuses the establishment; the establishment's
+    // own read of ESP then refuses the `sub`. The epilogue `leave` still goes.
+    const { code, report } = runStrip(
+      seq(0x401000, [
+        ["push", "ebp"],
+        ["mov", "ebp, esp"],
+        ["sub", "esp, 8"],
+        ["mov", "eax, dword ptr [0x414000]"],
+        ["xor", "eax, ebp"],
+        ["mov", "dword ptr [ebp - 4], eax"],
+        ["mov", "dword ptr [ebp - 8], 1"],
+        ["mov", "ecx, dword ptr [ebp - 4]"],
+        ["xor", "ecx, ebp"],
+        ["call", "0x403000"],
+        ["mov", "eax, dword ptr [ebp - 8]"],
+        ["leave"],
+        ["ret"],
+      ]),
+    );
+    expect(code).toContain("ebp = esp;");
+    expect(code).toMatch(/\^ ebp/);
+    expect(report?.fpReadsKept).toEqual(["gs-xor"]);
+    expect(report?.spReadsKept).toEqual(["fp-kept"]);
+    expect(code).not.toContain("unlifted: leave");
+  });
+
+  it("a cdecl cleanup after a call is deleted, even with a non-stack instruction between", () => {
+    // In a loop the `add esp, 4` is a phi cycle SSA's DCE cannot see through,
+    // so it survives to this pass. MSVC interleaves — `call / add [ebp-8], edi
+    // / add esp, 0x10` (t32 0x4027c3) — so the grammar walks back over
+    // instructions that neither touch the stack nor branch.
+    const { code, report } = runStrip(
+      seq(0x401000, [
+        ["push", "ebp"],
+        ["mov", "ebp, esp"],
+        ["mov", "esi, dword ptr [ebp + 8]"],
+        ["push", "esi"], // 0x40100c
+        ["call", "0x402000"],
+        ["mov", "edi, eax"],
+        ["add", "esp, 4"],
+        ["test", "edi, edi"],
+        ["jne", "0x40100c"],
+        ["pop", "ebp"],
+        ["ret"],
+      ]),
+    );
+    expect(code).not.toMatch(/\besp\b/);
+    expect(report?.deleted["cdecl-cleanup"]).toBe(1);
+    expect(report?.deleted["fp-establish"]).toBe(1);
+  });
+
+  it("a cdecl cleanup stays where a stack read survives in the function", () => {
+    // Same loop, plus one `[esp]` read the frame cannot name: function-wide,
+    // that keeps every ESP candidate.
+    const { code, report } = runStrip(
+      seq(0x401000, [
+        ["push", "ebp"],
+        ["mov", "ebp, esp"],
+        ["mov", "esi, dword ptr [ebp + 8]"],
+        ["push", "esi"], // 0x40100c
+        ["call", "0x402000"],
+        ["add", "esp, 4"],
+        ["mov", "edx, dword ptr [esp]"],
+        ["add", "eax, edx"],
+        ["test", "eax, eax"],
+        ["jne", "0x40100c"],
+        ["pop", "ebp"],
+        ["ret"],
+      ]),
+    );
+    expect(code).toContain("esp += 4;");
+    expect(report?.deleted["cdecl-cleanup"]).toBe(0);
+    expect(report?.spReadsKept).toContain("unnamed-slot");
+  });
+
+  it("x64: a leaf's sub rsp with every slot named is not printed", () => {
+    const { code, report } = runStrip(
+      seq(0x401000, [
+        ["sub", "rsp, 0x28"],
+        ["mov", "dword ptr [rsp + 0x20], 1"],
+        ["mov", "eax, dword ptr [rsp + 0x20]"],
+        ["add", "rsp, 0x28"],
+        ["ret"],
+      ]),
+      true,
+    );
+    expect(code).toContain("var_20 = 1;");
+    expect(mentions(code, /\brsp\b/g)).toBe(0);
+    expect(report?.framed).toBe(false);
+    expect(report?.deleted["sp-alloc"]).toBe(1);
+  });
+
+  it("x64: an indexed slot the frame cannot name keeps the sub rsp", () => {
+    const { code, report } = runStrip(
+      seq(0x401000, [
+        ["sub", "rsp, 0x28"],
+        ["mov", "dword ptr [rsp + 0x20], 1"],
+        ["mov", "eax, dword ptr [rsp + rcx*4 + 0x20]"],
+        ["add", "rsp, 0x28"],
+        ["ret"],
+      ]),
+      true,
+    );
+    expect(code).toContain("rsp -= 0x28;");
+    expect(report?.spReadsKept).toEqual(["unnamed-slot"]);
+  });
+
+  it("x64: a mid-body sub rsp, rax (alloca) keeps the prologue", () => {
+    const { code, report } = runStrip(
+      seq(0x401000, [
+        ["sub", "rsp, 0x28"],
+        ["mov", "dword ptr [rsp + 0x20], 1"],
+        ["mov", "eax, dword ptr [rsp + 0x20]"],
+        ["sub", "rsp, rax"],
+        ["mov", "rcx, rsp"],
+        ["call", "0x402000"],
+        ["add", "rsp, 0x28"],
+        ["ret"],
+      ]),
+      true,
+    );
+    expect(code).toContain("rsp -= 0x28;");
+    expect(code).toContain("rsp -= rax;");
+    expect(report?.spReadsKept).toContain("alloca");
+    expect(report?.deleted["sp-alloc"]).toBe(0);
+  });
+});

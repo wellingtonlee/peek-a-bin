@@ -9,7 +9,7 @@ The dispatch tables are the part to come back to: adding a union member means up
 switches, only nine of which the compiler catches. Run the throwaway-kind probe described below
 rather than trusting a count.
 
-**Pipeline** (`pipeline.ts`): `buildCFG → liftBlock → liftCrossBlockPops → buildSSA → ssaOptimize → destroySSA → foldBlock → structureCFG → cleanupStructured → wrapExceptionRegions → inferTypes → promoteVars → synthesizeStructs → emitFunction`
+**Pipeline** (`pipeline.ts`): `buildCFG → liftBlock → liftCrossBlockPops → buildSSA → ssaOptimize → destroySSA → foldBlock → structureCFG → cleanupStructured → wrapExceptionRegions → inferTypes → promoteVars → synthesizeStructs → stripFrameScaffolding → emitFunction`
 
 (`wrapExceptionRegions` is local to `pipeline.ts` and only runs when `.pdata` exception info is
 present. The docstring at the top of `pipeline.ts` lists a shorter, outdated order — trust the
