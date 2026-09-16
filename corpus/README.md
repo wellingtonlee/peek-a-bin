@@ -1166,6 +1166,22 @@ counted against the parameters the table declares. **Measured on base `7082e66` 
 | under (at the ABI ceiling / below it) | 26 (0/26) | 34 (26/8) | 34 (26/8) | 26 (0/26) |
 | **over — GATED at 0** | 0 | 0 | 0 | 0 |
 
+**`peek-a-bin-s1f6.2` MOVED THE x64 HALF, and `underAtCeiling` is the row that says so** — at
+`s30-arity-3b`, with x64 stack arguments five and up recovered from the outgoing slot stores:
+
+| | t32 | t64 | w64 | w32 |
+|---|---|---|---|---|
+| exact / sites | 79/105 | **103/127** | **109/133** | 85/111 |
+| under (at the ABI ceiling / below it) | 26 (0/26) | **24 (13/11)** | **24 (13/11)** | 26 (0/26) |
+| **over — GATED at 0** | 0 | 0 | 0 | 0 |
+
+**READ `under below the ceiling` BESIDE `at the ceiling`, not on its own.** It rose 8 -> 11 and
+`compare.mjs` flags that as a regression, which is the opposite of what happened: 13 rows LEFT the
+ceiling, 10 of them reaching `exact` and 3 gaining arguments without reaching it (`CreateFileW`
+4 -> 5, `WideCharToMultiByte` 4 -> 6, `MultiByteToWideChar` 4 -> 5). Every one of the 13 moved up
+and `over` stayed 0. x86 is byte-identical — the rule is x64 only, since on x86 arguments arrive by
+`push`.
+
 The same base with `peek-a-bin-7r1l` **not** applied reads 79/105, 90/127, 96/133 and 85/111
 exact, the same under counts and ceiling splits, and **over 0/3/3/0**. So the x64 fix moved 3 rows
 per x64 binary from `over` straight to `exact` with **the under counts and both ceiling splits

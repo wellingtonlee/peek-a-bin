@@ -10536,3 +10536,80 @@ describe("pipeline — a stdcall callee's `ret N` caps the emitted argument list
     expect(code).toContain("sub_402000(1, 2, 3)");
   });
 });
+
+/**
+ * x64 STACK ARGUMENTS FIVE AND UP, END TO END (peek-a-bin-s1f6.2).
+ *
+ * The stage-level tests pin the argument list; this pins the LINE, and the line
+ * is where the cost of NOT doing it was visible — the slot stores reached the
+ * page as `*(int64_t*)(rsp + 0x20) = …` above a call that appeared to take four
+ * arguments. Both directions are here, over the same fixture: the recovery, and
+ * the refusal when the function reads one of the slots.
+ */
+describe("pipeline — x64 arguments five and up from the outgoing slot stores", () => {
+  function runStackArgs(rows: [string, string?][]): string {
+    const instructions = seq(0x140001000, rows);
+    const last = instructions[instructions.length - 1];
+    const func: DisasmFunction = {
+      name: "sub_140001000",
+      address: 0x140001000,
+      size: last.address + last.size - 0x140001000,
+    };
+    return decompileFunction(
+      func,
+      instructions,
+      new Map<number, Xref[]>(),
+      null,
+      null,
+      true,
+      new Map(),
+      new Map(),
+      new Map(),
+      new Map([[0x140002000, { name: "sub_140002000", address: 0x140002000 }]]),
+    ).code;
+  }
+
+  // Register sources rather than immediates, so constant folding does not
+  // rewrite the argument list out from under the assertion.
+  const setup: [string, string?][] = [
+    ["mov", "qword ptr [rsp + 0x28], rbx"],
+    ["mov", "qword ptr [rsp + 0x20], rbp"],
+    ["mov", "r9, rdi"],
+    ["mov", "r8, rsi"],
+    ["mov", "rdx, r12"],
+    ["mov", "rcx, r13"],
+    ["call", "0x140002000"],
+    ["ret"],
+  ];
+
+  // `copyPropagation` rewrites the four register arguments to the registers
+  // they were copied FROM, which is correct and is not what these rows are
+  // about; the assertions name the propagated form so they cannot drift into
+  // asserting the propagation away.
+  it("passes the two filled slots as arguments five and six", () => {
+    const code = runStackArgs(setup);
+    expect(code).toContain("sub_140002000(r13, r12, rsi, rdi, rbp, rbx)");
+    // The stores are not ALSO on the page: the store IS the argument being
+    // passed, exactly as an x86 `push` of one is.
+    expect(code).not.toContain("rsp + 0x20");
+    expect(code).not.toContain("rsp + 0x28");
+  });
+
+  /**
+   * THE CONTROL, and it is the discriminator itself: one reload of `[rsp+0x20]`
+   * elsewhere in the function makes that slot a LOCAL — which `promoteVars`
+   * then names `var_20`, the reading this refusal exists to preserve — and the
+   * list is a prefix, so argument six goes with it and its store stays on the
+   * page.
+   */
+  it("refuses both when the function reads the first slot", () => {
+    const code = runStackArgs([
+      ...setup.slice(0, 7),
+      ["mov", "rax, qword ptr [rsp + 0x20]"],
+      ["ret"],
+    ]);
+    expect(code).toContain("sub_140002000(r13, r12, rsi, rdi)");
+    expect(code).toContain("var_20");
+    expect(code).toContain("rsp + 0x28");
+  });
+});

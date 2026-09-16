@@ -11,6 +11,7 @@ import {
   liftBlock,
   liftCrossBlockPops,
   matchedStackSlots,
+  outgoingSlotReads,
   parseOperand,
 } from "../lifter";
 import { RegState } from "../regstate";
@@ -44,6 +45,12 @@ interface LiftOpts {
   succs?: number[];
   /** `firstCalleeSavedWrites`' answer, for the x86 push walk. */
   firstWrites?: Map<string, number>;
+  /**
+   * `outgoingSlotReads`' answer over the whole function: which `[rsp + N]`
+   * bytes are READ somewhere. Absent means "nobody told us", which the x64
+   * stack-argument rule treats as no evidence rather than as no reads.
+   */
+  slotReads?: ReadonlySet<number>;
 }
 
 function lift(list: [string, string][], opts: LiftOpts = {}): IRStmt[] {
@@ -58,6 +65,11 @@ function lift(list: [string, string][], opts: LiftOpts = {}): IRStmt[] {
     opts.funcs ?? new Map(),
     opts.firstWrites,
     opts.clobbers,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    opts.slotReads,
   );
 }
 
@@ -3233,5 +3245,323 @@ describe("liftBlock — a stdcall callee's `ret N` caps the push walk", () => {
       ),
     );
     expect(args).toHaveLength(2);
+  });
+});
+
+/**
+ * x64 STACK ARGUMENTS FIVE AND UP (peek-a-bin-s1f6.2).
+ *
+ * The Microsoft x64 convention puts argument N (N >= 5) at
+ * `[rsp + 0x20 + 8*(N-5)]` in the CALLER's frame. `collectArgs64` reads the four
+ * registers and nothing else, so every such call was arity-short by exactly that
+ * many and the stores reached the page as raw `*(int64_t*)(rsp + 0x20) = …`
+ * lines above the call.
+ *
+ * Each `it` below is one of the refusals, and the refusals are the rule: the
+ * discriminator between an outgoing argument and a local is that a local is
+ * READ somewhere, so nothing here may be relaxed without a new reading of the
+ * machine. None of it consults `apitypes.ts` — `corpus/arity.ts` audits the
+ * emitted arity against that table, so a lifter reading it blinds the only arity
+ * oracle in this repo.
+ */
+describe("liftBlock — x64 stack arguments five and up", () => {
+  const argsOfCall = (stmts: IRStmt[]): IRExpr[] => {
+    const call = stmts.find((s) => s.kind === "call_stmt");
+    if (call === undefined || call.kind !== "call_stmt") throw new Error("no call");
+    return call.call.args;
+  };
+
+  /** All four registers written, then two slots filled, then the call. */
+  const sixArgs: [string, string][] = [
+    ["mov", "qword ptr [rsp + 0x28], rbx"],
+    ["mov", "qword ptr [rsp + 0x20], rbp"],
+    ["mov", "r9, rdi"],
+    ["mov", "r8, rsi"],
+    ["mov", "rdx, r12"],
+    ["mov", "rcx, r13"],
+    ["call", "0x402000"],
+  ];
+
+  it("reads two filled slots as arguments five and six", () => {
+    const stmts = lift(sixArgs, { is64: true, slotReads: new Set() });
+    const args = argsOfCall(stmts);
+    expect(args).toHaveLength(6);
+    expect(args[4]).toEqual(irReg("rbp", 8));
+    expect(args[5]).toEqual(irReg("rbx", 8));
+    // The stores are GONE: an outgoing argument's store is the argument being
+    // passed, exactly as an x86 `push` of one produces no statement. Emitting
+    // both would state the value twice.
+    expect(stmts.filter((s) => s.kind === "store")).toHaveLength(0);
+  });
+
+  /**
+   * (c) THE WHOLE DISCRIMINATOR. A read of the slot anywhere in the function
+   * makes it a local — in a function whose own outgoing arity is four or less,
+   * `[rsp + 0x20]` IS one — and the list is a prefix, so a refusal at 0x20 takes
+   * 0x28 with it.
+   */
+  it("refuses a slot the function reads somewhere", () => {
+    const args = argsOfCall(lift(sixArgs, { is64: true, slotReads: new Set([0x20]) }));
+    expect(args).toHaveLength(4);
+  });
+
+  /** A read of any BYTE of the slot counts: two 4-byte locals share one slot. */
+  it("refuses a slot whose upper half is read", () => {
+    const args = argsOfCall(lift(sixArgs, { is64: true, slotReads: new Set([0x24]) }));
+    expect(args).toHaveLength(4);
+  });
+
+  /** A refusal at the SECOND slot keeps the first: the list is a prefix. */
+  it("keeps argument five when only argument six's slot is read", () => {
+    const args = argsOfCall(lift(sixArgs, { is64: true, slotReads: new Set([0x28]) }));
+    expect(args).toHaveLength(5);
+    expect(args[4]).toEqual(irReg("rbp", 8));
+  });
+
+  /**
+   * (a) ARGUMENTS ARE POSITIONAL. A fifth cannot exist while a fourth does not,
+   * so a call the register scan stopped short on is not one this can extend —
+   * and a spill to `[rsp+0x20]` in such a function is exactly the local the
+   * refusal above is about.
+   */
+  it("refuses when the register scan did not return all four", () => {
+    const args = argsOfCall(
+      lift(
+        [
+          ["mov", "qword ptr [rsp + 0x20], rbp"],
+          ["mov", "rdx, r12"],
+          ["mov", "rcx, r13"],
+          ["call", "0x402000"],
+        ],
+        { is64: true, slotReads: new Set() },
+      ),
+    );
+    expect(args).toHaveLength(2);
+  });
+
+  /** (b) CONTIGUITY. A gap means the run does not describe one argument list. */
+  it("refuses a run that does not start at 0x20", () => {
+    const args = argsOfCall(
+      lift(
+        [
+          ["mov", "qword ptr [rsp + 0x28], rbx"],
+          ["mov", "r9, rdi"],
+          ["mov", "r8, rsi"],
+          ["mov", "rdx, r12"],
+          ["mov", "rcx, r13"],
+          ["call", "0x402000"],
+        ],
+        { is64: true, slotReads: new Set() },
+      ),
+    );
+    expect(args).toHaveLength(4);
+  });
+
+  it("stops the run at a gap", () => {
+    const args = argsOfCall(
+      lift(
+        [
+          ["mov", "qword ptr [rsp + 0x30], rbx"],
+          ["mov", "qword ptr [rsp + 0x20], rbp"],
+          ["mov", "r9, rdi"],
+          ["mov", "r8, rsi"],
+          ["mov", "rdx, r12"],
+          ["mov", "rcx, r13"],
+          ["call", "0x402000"],
+        ],
+        { is64: true, slotReads: new Set() },
+      ),
+    );
+    expect(args).toHaveLength(5);
+  });
+
+  /** (b) A store above an earlier call belongs to THAT call's argument list. */
+  it("does not reach past an earlier call in the same block", () => {
+    const args = argsOfCall(
+      lift(
+        [
+          ["mov", "qword ptr [rsp + 0x20], rbp"],
+          ["call", "0x403000"],
+          ["mov", "r9, rdi"],
+          ["mov", "r8, rsi"],
+          ["mov", "rdx, r12"],
+          ["mov", "rcx, r13"],
+          ["call", "0x402000"],
+        ],
+        { is64: true, slotReads: new Set() },
+      ).filter((s) => s.kind === "call_stmt" && s.call.target === "sub_402000"),
+    );
+    expect(args).toHaveLength(4);
+  });
+
+  /**
+   * THE READ IS MOVED from the store to the call, so a register the setup
+   * overwrites in between cannot be read there — that is `peek-a-bin-urs`'
+   * class. MSVC fills the slots first and the registers afterwards, which is
+   * exactly when this bites.
+   */
+  it("refuses a source register the argument setup overwrites before the call", () => {
+    const args = argsOfCall(
+      lift(
+        [
+          ["mov", "qword ptr [rsp + 0x20], r8"],
+          ["mov", "r9, rdi"],
+          ["mov", "r8, rsi"],
+          ["mov", "rdx, r12"],
+          ["mov", "rcx, r13"],
+          ["call", "0x402000"],
+        ],
+        { is64: true, slotReads: new Set() },
+      ),
+    );
+    expect(args).toHaveLength(4);
+  });
+
+  /** An immediate names no register, so it can never go stale. */
+  it("accepts an immediate source", () => {
+    const args = argsOfCall(
+      lift(
+        [
+          ["mov", "qword ptr [rsp + 0x20], 0"],
+          ["mov", "r9, rdi"],
+          ["mov", "r8, rsi"],
+          ["mov", "rdx, r12"],
+          ["mov", "rcx, r13"],
+          ["call", "0x402000"],
+        ],
+        { is64: true, slotReads: new Set() },
+      ),
+    );
+    expect(args).toHaveLength(5);
+    expect(args[4]).toEqual(irConst(0, 8));
+  });
+
+  /**
+   * `callSummary.ts`'s write scan UNDER-approximates, which is the safe
+   * direction for a clobber set and the unsafe one here: an unrecognised
+   * mnemonic must refuse rather than contribute no writes.
+   */
+  it("refuses when an instruction in between is one callSummary cannot classify", () => {
+    const args = argsOfCall(
+      lift(
+        [
+          ["mov", "qword ptr [rsp + 0x20], rbp"],
+          ["vfmadd231ps", "ymm0, ymm1, ymm2"],
+          ["mov", "r9, rdi"],
+          ["mov", "r8, rsi"],
+          ["mov", "rdx, r12"],
+          ["mov", "rcx, r13"],
+          ["call", "0x402000"],
+        ],
+        { is64: true, slotReads: new Set() },
+      ),
+    );
+    expect(args).toHaveLength(4);
+  });
+
+  /**
+   * Absent evidence is not evidence of absence: a caller that computed no read
+   * set gets exactly the pre-rule behaviour, and the stores stay on the page.
+   */
+  it("recovers nothing when nobody supplied a read set", () => {
+    const stmts = lift(sixArgs, { is64: true });
+    expect(argsOfCall(stmts)).toHaveLength(4);
+    expect(stmts.filter((s) => s.kind === "store")).toHaveLength(2);
+  });
+
+  /** x86 has no home area and passes by `push`; the rule must not fire there. */
+  it("does not fire on x86", () => {
+    const args = argsOfCall(
+      lift(
+        [
+          ["mov", "dword ptr [esp + 0x20], ebp"],
+          ["call", "0x402000"],
+        ],
+        { is64: false, slotReads: new Set() },
+      ),
+    );
+    expect(args).toHaveLength(0);
+  });
+});
+
+describe("outgoingSlotReads", () => {
+  const blockOfAt = (list: [string, string][]): BasicBlock => blockOf(list);
+
+  it("records a read of a slot and not the store that fills it", () => {
+    const reads = outgoingSlotReads([
+      blockOfAt([
+        ["mov", "qword ptr [rsp + 0x20], rbp"],
+        ["mov", "rax, qword ptr [rsp + 0x28]"],
+      ]),
+    ]);
+    expect(reads.has(0x20)).toBe(false);
+    expect(reads.has(0x28)).toBe(true);
+    expect(reads.has(0x2f)).toBe(true);
+  });
+
+  /**
+   * Only the destination of a `mov` is a store. A read-modify-write and an
+   * address-taking `lea` are reads — the conservatism refuses in every
+   * direction, which is the safe one here.
+   */
+  it("treats a read-modify-write and a lea as reads", () => {
+    const rmw = outgoingSlotReads([blockOfAt([["add", "qword ptr [rsp + 0x20], 1"]])]);
+    expect(rmw.has(0x20)).toBe(true);
+    const lea = outgoingSlotReads([blockOfAt([["lea", "rax, [rsp + 0x20]"]])]);
+    expect(lea.has(0x20)).toBe(true);
+  });
+
+  /** Below the first stack-argument slot is the HOME area, which is not this. */
+  it("ignores an access below 0x20", () => {
+    const reads = outgoingSlotReads([blockOfAt([["mov", "rax, qword ptr [rsp + 0x18]"]])]);
+    expect(reads.size).toBe(0);
+  });
+
+  /**
+   * THE DISPLACEMENT IS NOT ALWAYS HEX. Capstone prints a small one in DECIMAL,
+   * and `mov qword ptr [rsp + 8], rbx` is the first instruction of a great many
+   * x64 prologues — w64!sub_140001444, the `SearchPathW` witness, among them. A
+   * hex-only pattern leaves it unreadable, which marks the whole window read and
+   * refuses every stack argument in the function. Both spellings are asserted so
+   * that the refusal cannot come back as a silent zero.
+   */
+  it("reads a decimal displacement, and a prologue spill is below the window", () => {
+    const reads = outgoingSlotReads([
+      blockOfAt([
+        ["mov", "qword ptr [rsp + 8], rbx"],
+        ["mov", "rax, qword ptr [rsp + 8]"],
+      ]),
+    ]);
+    expect(reads.size).toBe(0);
+    const decimalRead = outgoingSlotReads([blockOfAt([["mov", "rax, qword ptr [rsp + 40]"]])]);
+    expect(decimalRead.has(40)).toBe(true);
+    expect(decimalRead.has(0x40)).toBe(false);
+  });
+
+  /** `[rsp]` and a negative displacement are below the window, not refusals. */
+  it("treats a bare or negative RSP operand as below the window", () => {
+    const bare = outgoingSlotReads([blockOfAt([["mov", "rax, qword ptr [rsp]"]])]);
+    expect(bare.size).toBe(0);
+    const neg = outgoingSlotReads([blockOfAt([["mov", "rax, qword ptr [rsp - 8]"]])]);
+    expect(neg.size).toBe(0);
+  });
+
+  /**
+   * An INDEXED RSP operand has no constant offset, so "I do not know which
+   * slot" must not become "no slot": the whole window is marked read.
+   */
+  it("marks the whole window for an indexed RSP access", () => {
+    const reads = outgoingSlotReads([blockOfAt([["mov", "rax, qword ptr [rsp + rcx*8 + 0x20]"]])]);
+    expect(reads.has(0x20)).toBe(true);
+    expect(reads.has(0x28)).toBe(true);
+    expect(reads.has(0x58)).toBe(true);
+  });
+
+  /** A narrow store leaves the rest of the slot unmarked; a narrow READ marks
+   * only its own bytes, and the caller widens to the slot. */
+  it("marks only the bytes a narrow read touches", () => {
+    const reads = outgoingSlotReads([blockOfAt([["mov", "eax, dword ptr [rsp + 0x20]"]])]);
+    expect(reads.has(0x23)).toBe(true);
+    expect(reads.has(0x24)).toBe(false);
   });
 });

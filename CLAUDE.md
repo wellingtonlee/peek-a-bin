@@ -1437,6 +1437,22 @@ refused. **Read the long-form entry before changing the code it describes.**
   **NOT a defect**. `stdcallSites` is the gate's own liveness half — `compared` is dominated by
   frame-counted callees, so a run resolving no `ret N` callee would report a perfect 0 over an empty
   population. The `isCalleeSavedSave` control is **INERT** for this row and is reported as such.
+- **x64 ARGUMENTS FIVE AND UP COME FROM THE OUTGOING SLOT STORES, and the discriminator is that a
+  LOCAL IS READ.** `mov [rsp + 0x20 + 8k], X` before a call is the Microsoft x64 convention's
+  argument N; `collectArgs64` reads the four registers only, so every such call was short by exactly
+  that many. Recognised under three requirements — **(a)** the register scan returned ALL FOUR
+  (arguments are positional), **(b)** the stores are CONTIGUOUS FROM 0x20, in the call's own block,
+  after any earlier call in it, **(c)** NO READ of any byte of the slot ANYWHERE in the function
+  (`outgoingSlotReads`, function-wide like `firstCalleeSavedWrites`) — plus two refusals about the
+  read being MOVED to the call: the source must be an immediate or a register nothing writes in
+  between, and every instruction in between must be one `isCoveredMnemonic` classifies. **(d) is
+  corroboration and there is nothing to consult**: no x64 callee fact can contradict a fifth
+  argument (`inferSignature64` is a lower bound capped at 4; `stack.ts` records every `[rsp + N]`
+  access as a NON-parameter), so implementing it would be an inert test. The consumed stores are
+  DROPPED — the store *is* the argument, exactly as an x86 `push` of one emits no statement. The
+  result is a PREFIX. **NEVER CONSULT `apitypes.ts` HERE** — that is `corpus/arity.ts`'s oracle.
+  **Capstone prints a small displacement in DECIMAL** (`[rsp + 8]`), and a hex-only pattern made
+  every prologue-spilling function refuse everything.
 - **A `push` of a callee-saved register the function has not yet written is a register SAVE** — and
   that, not the register and not the position, is the discriminator. Two rules refuted by this
   corpus: "a push of ebx/esi/edi is a save", and "a save has a matching `pop` before the `ret`".

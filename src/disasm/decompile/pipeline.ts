@@ -12,7 +12,13 @@ import { entryBindings } from "./entryBindings";
 import { carryPredecessor, flagPredecessor } from "./flagModel";
 import { blockLiveOut, foldBlock } from "./fold";
 import { bodiesOf, type IRBranch, type IRExpr, type IRStmt, type IRTry, rewriteBodies } from "./ir";
-import { firstCalleeSavedWrites, liftBlock, liftCrossBlockPops, matchedStackSlots } from "./lifter";
+import {
+  firstCalleeSavedWrites,
+  liftBlock,
+  liftCrossBlockPops,
+  matchedStackSlots,
+  outgoingSlotReads,
+} from "./lifter";
 import type { NamingContext } from "./naming";
 import { type FrameStripReport, stripFrameScaffolding } from "./prologue";
 import { applyUserNames, promoteVars } from "./promote";
@@ -222,6 +228,12 @@ export function decompileFunction(
     // a loop nest between them, so the pairing cannot be answered inside
     // `liftBlock` at all (peek-a-bin-6f3v).
     const stackSlots = matchedStackSlots(blocks, is64);
+    // The fourth, and the one that decides whether a store to the bottom of the
+    // frame is an outgoing argument or a local: which bytes of `[rsp + 0x20..]`
+    // this function READS. Function-wide by necessity — a spill written in one
+    // block is reloaded in another — and x64 only, since on x86 every argument
+    // arrives by `push` (peek-a-bin-s1f6.2).
+    const slotReads = is64 ? outgoingSlotReads(blocks) : undefined;
     const liftedBlocks = new Map<number, import("./ir").IRStmt[]>();
     // The second piece of non-block-local context, and it is a *flag* fact: a
     // block that writes no flag at all reads the ones its predecessor left, so a
@@ -244,6 +256,7 @@ export function decompileFunction(
         stackSlots,
         func,
         carryPredecessor(block, blockById),
+        slotReads,
       );
       liftedBlocks.set(block.id, stmts);
     }

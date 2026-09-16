@@ -1,5 +1,5 @@
 import type { CalleeClobbers } from "../callSummary";
-import { resolveBranchTargetAddr } from "../callSummary";
+import { isCoveredMnemonic, resolveBranchTargetAddr, writtenRegsOfInsn } from "../callSummary";
 import type { BasicBlock } from "../cfg";
 import type { CrtIdiom } from "../crtIdioms";
 import { resolveRipMemExpr, resolveRipTarget } from "../ripRelative";
@@ -1650,6 +1650,16 @@ export function liftBlock(
    */
   self?: Pick<DisasmFunction, "name" | "isThunk">,
   carryPred?: BasicBlock,
+  /**
+   * Which bytes of the outgoing argument area this FUNCTION reads
+   * (`outgoingSlotReads`). The fourth piece of non-block-local context, and the
+   * discriminator between an outgoing stack argument and a local: a slot at the
+   * bottom of the frame that is stored and never read is being handed to a
+   * callee. Undefined means "nobody told us", which — as with
+   * `calleeSavedFirstWrite` — is deliberately NOT the same claim as "there are
+   * no reads": arguments five and up are simply not recovered. x64 only.
+   */
+  slotReads?: ReadonlySet<number>,
 ): IRStmt[] {
   const stmts: IRStmt[] = [];
 
@@ -2315,6 +2325,12 @@ export function liftBlock(
         : is64
           ? collectArgs64(regState)
           : collectArgs32(block, insn, is64, calleeSavedFirstWrite, calleeClobbers?.signatures);
+      // Arguments five and up, from the stores that fill `[rsp + 0x20..]`. Only
+      // where the register scan returned all four, only from stores this block
+      // makes after any earlier call, and only where no slot is read anywhere in
+      // the function — see `collectStackArgs64` for the four conditions and for
+      // why it must never consult `apitypes.ts`.
+      if (is64 && !idiom?.args) appendStackArgs64(block, insnIndex, stmts, slotReads, args);
       const call: IRCall = {
         kind: "call",
         target: target.name,
@@ -2370,6 +2386,10 @@ export function liftBlock(
           : is64
             ? collectArgs64(regState)
             : collectArgs32(block, insn, is64, calleeSavedFirstWrite, calleeClobbers?.signatures);
+        // A tail `jmp` transfers the SAME argument area — the frame is this
+        // function's and the callee returns to its caller — so the stack
+        // arguments are read here too.
+        if (is64 && !idiom?.args) appendStackArgs64(block, insnIndex, stmts, slotReads, args);
         // An import thunk is NAMED after the import it jumps to (functionDetect's
         // thunk renaming), so the resolved name here is the function's own name
         // and `return RtlVirtualUnwind();` would be a call to itself. The
@@ -3075,6 +3095,291 @@ function collectArgs64(regState: RegState): IRExpr[] {
     args.push(irReg(reg, 8));
   }
   return args;
+}
+
+// ── x64 stack arguments five and up ────────────────────────────────────────
+
+/**
+ * The first outgoing argument slot the Microsoft x64 convention puts in the
+ * caller's frame. Below it are the four HOME slots, which belong to the four
+ * register arguments and are the callee's to spill into.
+ */
+const X64_FIRST_STACK_SLOT = 0x20;
+
+/** Slot stride, and the width of one argument slot whatever the store's width. */
+const X64_SLOT_BYTES = 8;
+
+/**
+ * How far above `0x20` this rule will look. A bound rather than a measured
+ * saving: the widest call in this corpus is six arguments, and an unbounded
+ * window would let one contiguous run of spills describe a 40-argument call.
+ */
+const MAX_STACK_ARG_SLOTS = 8;
+
+/**
+ * `[rsp + 0xNN]`, with the width prefix Capstone writes in front of a store.
+ *
+ * **THE DISPLACEMENT IS NOT ALWAYS HEX, and reading it as if it were refused
+ * the whole rule.** Capstone prints a small displacement in DECIMAL —
+ * `qword ptr [rsp + 8]`, which is the first instruction of a great many x64
+ * prologues — so a hex-only pattern left that operand unreadable, and
+ * {@link outgoingSlotReads}' honest "I do not know which slot" response is to
+ * mark the WHOLE window read. Every function with a prologue spill therefore
+ * refused every stack argument. Found by hand-reading w64!sub_140001444, the
+ * `SearchPathW` witness, which has both slots filled contiguously and no read
+ * of either and recovered nothing.
+ *
+ * A missing displacement (`[rsp]`) and a negative one are both offset < 0x20
+ * and are simply not in the argument window; neither is a refusal.
+ */
+const RSP_SLOT_OPERAND =
+  /^(?:(qword|dword|word|byte)\s+ptr\s+)?\[\s*rsp\s*(?:([+-])\s*(0x[0-9a-f]+|\d+)\s*)?\]$/i;
+
+/** Any memory operand mentioning RSP, used to find the ones this cannot read. */
+const RSP_MEM = /\[([^\]]*\brsp\b[^\]]*)\]/i;
+
+const SLOT_WIDTHS: Record<string, number> = { qword: 8, dword: 4, word: 2, byte: 1 };
+
+/** An immediate operand, which names no register and so can never go stale. */
+const IMMEDIATE_OPERAND = /^-?(?:0x[0-9a-f]+|\d+)$/i;
+
+/** `[rsp ± N]` as a slot offset and width, or null if it is not one. */
+function rspSlot(operand: string): { off: number; width: number } | null {
+  const m = RSP_SLOT_OPERAND.exec(operand.trim());
+  if (m === null) return null;
+  const magnitude = m[3] === undefined ? 0 : Number.parseInt(m[3], m[3].startsWith("0x") ? 16 : 10);
+  return {
+    off: m[2] === "-" ? -magnitude : magnitude,
+    width: m[1] ? SLOT_WIDTHS[m[1].toLowerCase()] : 8,
+  };
+}
+
+/**
+ * Every BYTE of the outgoing argument area this function READS, over the whole
+ * CFG — the refusal that separates an argument from a local.
+ *
+ * THE ASYMMETRY THIS RESTS ON. A slot at the bottom of the frame that is
+ * STORED and never READ is the caller handing a value to a callee: nothing in
+ * this function ever looks at it again, and the only thing that can be looking
+ * is the call. A slot that IS read somewhere is a local — and in a function
+ * whose own outgoing arity is four or less, `[rsp + 0x20]` is exactly that: the
+ * first byte above the home area, which MSVC uses for ordinary storage. The
+ * question therefore cannot be answered inside one block, which is why this is
+ * computed once over `blocks` and threaded into `liftBlock` the way
+ * `firstCalleeSavedWrites` and `matchedStackSlots` are.
+ *
+ * Read CONSERVATIVELY, and every direction of the conservatism refuses rather
+ * than admits: the destination of a `mov` is the only position treated as a
+ * store, so a read-modify-write (`add [rsp+0x20], 1`), an address-taking `lea`
+ * and every operand of every other mnemonic all count as reads. An RSP memory
+ * operand this grammar cannot read at all — an INDEXED one, `[rsp + rax*8 +
+ * 0x20]`, whose offset is not a constant — marks the WHOLE window read, because
+ * "I do not know which slot" must not become "no slot".
+ *
+ * x64 only: `X64_FIRST_STACK_SLOT` is the Microsoft x64 convention's, and on
+ * x86 every argument arrives by `push`, which `collectArgs32` already reads.
+ */
+export function outgoingSlotReads(blocks: BasicBlock[]): Set<number> {
+  const out = new Set<number>();
+  const markAll = (): void => {
+    for (let i = 0; i < MAX_STACK_ARG_SLOTS * X64_SLOT_BYTES; i++) {
+      out.add(X64_FIRST_STACK_SLOT + i);
+    }
+  };
+  for (const block of blocks) {
+    for (const insn of block.insns) {
+      // `withoutLockPrefix` rather than `flagModel.ts`'s private
+      // `baseMnemonic`, which that module deliberately does not export; it
+      // lowercases and leaves every other prefix in place, so a `rep movs` is
+      // not mistaken for a `mov` store.
+      const mn = withoutLockPrefix(insn.mnemonic);
+      const parts = splitOperands(insn.opStr);
+      for (let i = 0; i < parts.length; i++) {
+        const operand = parts[i];
+        if (!RSP_MEM.test(operand)) continue;
+        const slot = rspSlot(operand);
+        if (slot === null) {
+          // An RSP operand whose offset this grammar cannot read. Refusing one
+          // slot would be a guess about which; refuse the window.
+          markAll();
+          continue;
+        }
+        if (slot.off < X64_FIRST_STACK_SLOT) continue;
+        const isStore = i === 0 && mn === "mov" && parts.length === 2;
+        if (isStore) continue;
+        for (let b = 0; b < slot.width; b++) out.add(slot.off + b);
+      }
+    }
+  }
+  return out;
+}
+
+/** One `mov [rsp + 0xNN], <src>` that might be an outgoing argument. */
+interface SlotStore {
+  off: number;
+  /** The storing instruction's index in the block. */
+  index: number;
+  addr: number;
+  /** The source operand, verbatim. */
+  src: string;
+}
+
+/**
+ * Arguments five and up for one x64 call, from the stores that fill the
+ * outgoing argument area — or null where any part of the evidence is missing.
+ *
+ * THE MICROSOFT x64 CONVENTION puts argument N (N >= 5) at
+ * `[rsp + 0x20 + 8*(N-5)]` in the CALLER's frame, and `collectArgs64` reads the
+ * four registers and nothing else, so every such call is arity-short by exactly
+ * that many — reported by `corpus/arity.ts` as UNDER at the ABI ceiling, 26 of
+ * 34 rows on each x64 corpus binary, and the witness is `SearchPathW` called
+ * with 4 of its 6 in w64!sub_140001444.
+ *
+ * **IT MUST NOT CONSULT `apitypes.ts`, and that is not a stylistic rule.**
+ * `corpus/arity.ts` audits the emitted arity AGAINST that table, so a lifter
+ * that read it would measure its own input and blind the only oracle in this
+ * repo that can see call arity at all. Everything below is read off the machine.
+ *
+ * FOUR CONDITIONS, and the first three are requirements:
+ *
+ *  (a) `collectArgs64` returned ALL FOUR registers. Arguments are positional: a
+ *      fifth cannot exist while a fourth does not, so a call the register scan
+ *      stopped short on is not a call this can extend.
+ *  (b) The stores are CONTIGUOUS FROM 0x20, in the call's own block, and after
+ *      any earlier `call` in it. A gap means the run does not describe one
+ *      argument list; a store above an earlier call belongs to THAT call's list.
+ *  (c) NO READ of any overlapping slot ANYWHERE in the function — see
+ *      {@link outgoingSlotReads}. This is the whole discriminator between an
+ *      outgoing argument and a local.
+ *
+ *  (d) The callee's own frame evidence is corroboration and NOT a requirement,
+ *      and after looking for it there is nothing to consult: **no fact this tool
+ *      has about an x64 callee can contradict a fifth argument.**
+ *      `inferSignature64` is a lower bound capped at 4, so it cannot say "four
+ *      or fewer"; `analyzeStackFrame` records every `[rsp + N]` access as a
+ *      NON-parameter by construction (`isArgumentSlot` is asked only of
+ *      `bp`-based offsets), so an `arg_N` for N >= 4 exists only in a
+ *      `bp`-framed callee and its ABSENCE is not evidence. Implementing (d)
+ *      would therefore be an inert test, and an inert test is reported rather
+ *      than written (peek-a-bin-s1f6.2).
+ *
+ * TWO FURTHER REFUSALS, both about the fact that an argument read is MOVED from
+ * the store to the call:
+ *
+ *  - the source must be an IMMEDIATE or a REGISTER, and for a register no
+ *    instruction between the store and the call may write it. MSVC fills the
+ *    slots first and the registers afterwards, so `mov [rsp+0x20], r8d` /
+ *    `mov r8, …` / `call` is the ordinary shape and moving that read forward
+ *    would bind it to the wrong definition — `peek-a-bin-urs`' class.
+ *  - every instruction in between must be one `callSummary.ts` CLASSIFIES
+ *    (`isCoveredMnemonic`). That scan under-approximates writes, which is the
+ *    safe direction for a clobber set and the UNSAFE one here, so an
+ *    unrecognised mnemonic refuses instead of contributing nothing.
+ *
+ * The result is a PREFIX, exactly as `collectArgs64` is: the longest run from
+ * slot 0x20 every check passes. A slot that fails ends the list rather than
+ * being skipped, because the position is the argument's identity.
+ */
+function collectStackArgs64(
+  block: BasicBlock,
+  callIdx: number,
+  stmts: IRStmt[],
+  slotReads: ReadonlySet<number> | undefined,
+): { args: IRExpr[]; dropAddrs: Set<number> } | null {
+  if (slotReads === undefined) return null;
+  const insns = block.insns;
+
+  // (b), first half: the stores, nearest-first, stopping at any earlier call.
+  const stores = new Map<number, SlotStore>();
+  for (let i = callIdx - 1; i >= 0; i--) {
+    const insn = insns[i];
+    const mn = withoutLockPrefix(insn.mnemonic);
+    if (mn === "call") break;
+    if (mn !== "mov") continue;
+    const parts = splitOperands(insn.opStr);
+    if (parts.length !== 2) continue;
+    const slot = rspSlot(parts[0]);
+    if (slot === null || slot.off < X64_FIRST_STACK_SLOT) continue;
+    if ((slot.off - X64_FIRST_STACK_SLOT) % X64_SLOT_BYTES !== 0) continue;
+    // Nearest-first, so the store that REACHES the call wins over an earlier
+    // one to the same slot.
+    if (!stores.has(slot.off)) {
+      stores.set(slot.off, { off: slot.off, index: i, addr: insn.address, src: parts[1].trim() });
+    }
+  }
+  if (!stores.has(X64_FIRST_STACK_SLOT)) return null;
+
+  const args: IRExpr[] = [];
+  const dropAddrs = new Set<number>();
+  for (let k = 0; k < MAX_STACK_ARG_SLOTS; k++) {
+    const off = X64_FIRST_STACK_SLOT + k * X64_SLOT_BYTES;
+    const store = stores.get(off);
+    if (store === undefined) break; // (b): contiguity ends the list.
+    // (c): a read of any byte of this slot makes it a local.
+    let read = false;
+    for (let b = 0; b < X64_SLOT_BYTES; b++) if (slotReads.has(off + b)) read = true;
+    if (read) break;
+    if (!slotSourceSurvives(insns, store, callIdx)) break;
+    // The value is taken from the STORE's own lifted statement, so the
+    // expression is the one built at the store's program point rather than a
+    // re-parse at the call's.
+    const at = stmts.findIndex((st) => st.kind === "store" && st.addr === store.addr);
+    if (at < 0) break;
+    const st = stmts[at];
+    if (st.kind !== "store") break;
+    args.push(st.value);
+    dropAddrs.add(store.addr);
+  }
+  return args.length === 0 ? null : { args, dropAddrs };
+}
+
+/**
+ * Can this store's source be read at the CALL instead of at the store?
+ *
+ * An immediate always can. A register can only if nothing between the two
+ * writes it — and only if everything between is a mnemonic
+ * `callSummary.ts` classifies, since its scan under-approximates writes and an
+ * unrecognised one would silently contribute none. Anything else (a memory
+ * source, an expression) is refused outright.
+ */
+function slotSourceSurvives(insns: Instruction[], store: SlotStore, callIdx: number): boolean {
+  const src = store.src;
+  if (IMMEDIATE_OPERAND.test(src)) return true;
+  if (!isKnownRegister(src)) return false;
+  const canon = canonReg(src);
+  for (let i = store.index + 1; i < callIdx; i++) {
+    const insn = insns[i];
+    if (!isCoveredMnemonic(insn.mnemonic)) return false;
+    for (const w of writtenRegsOfInsn(insn)) if (w === canon) return false;
+  }
+  return true;
+}
+
+/**
+ * Append arguments five and up to `args`, dropping the stores they came from.
+ *
+ * The stores are REMOVED from the block's statements, exactly as an x86 `push`
+ * of an argument produces no statement of its own: the instruction's effect is
+ * the argument being passed, and emitting both the store and the argument would
+ * state the value twice. The value stays live because the call now reads it.
+ */
+function appendStackArgs64(
+  block: BasicBlock,
+  callIdx: number,
+  stmts: IRStmt[],
+  slotReads: ReadonlySet<number> | undefined,
+  args: IRExpr[],
+): void {
+  if (args.length !== FASTCALL_REGS_64.length) return; // (a)
+  const extra = collectStackArgs64(block, callIdx, stmts, slotReads);
+  if (extra === null) return;
+  for (let i = stmts.length - 1; i >= 0; i--) {
+    const st = stmts[i];
+    if (st.kind === "store" && st.addr !== undefined && extra.dropAddrs.has(st.addr)) {
+      stmts.splice(i, 1);
+    }
+  }
+  args.push(...extra.args);
 }
 
 /**
