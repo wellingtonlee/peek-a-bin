@@ -743,6 +743,10 @@ export async function dispatch(
         },
         // Read by the client off the PE, since the worker has no `.rdata`.
         args.seh32Scopes as Seh32ScopeTable | null | undefined,
+        // The user's variable renames for this function, forwarded as sent;
+        // `applyUserNames` decides what is applied. Absent from every caller
+        // but `disasmClient` (peek-a-bin-5b6q.7).
+        args.userNames as Record<string, string> | undefined,
       );
     }
 

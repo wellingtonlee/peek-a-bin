@@ -14,7 +14,7 @@ import { blockLiveOut, foldBlock } from "./fold";
 import { bodiesOf, type IRBranch, type IRExpr, type IRStmt, type IRTry, rewriteBodies } from "./ir";
 import { firstCalleeSavedWrites, liftBlock, liftCrossBlockPops, matchedStackSlots } from "./lifter";
 import type { NamingContext } from "./naming";
-import { promoteVars } from "./promote";
+import { applyUserNames, promoteVars } from "./promote";
 import { RegState } from "./regstate";
 import { buildSSA, detectNaturalLoops } from "./ssa";
 import { destroySSA } from "./ssadestroy";
@@ -175,6 +175,17 @@ export function decompileFunction(
    * every parameter above it is last. See `annotateTrylevelStores`.
    */
   seh32Scopes?: Seh32ScopeTable | null,
+  /**
+   * The user's variable renames for THIS function, keyed by the generated name
+   * they were made against (`var_20`, `arg_1`, `hFile`) — see `applyUserNames`
+   * in `promote.ts` for what is applied and what is skipped. Applied in the
+   * pipeline rather than at render so every consumer of `code` — the panel,
+   * Copy, MCP, the AI tab's input — carries the names, and so `lineMap` stays
+   * exact by construction. Absent means no renames, the only value every
+   * caller but `disasmClient` ever passes. Last, after `naming`, on the rule
+   * every parameter since `tap` follows (peek-a-bin-5b6q.7).
+   */
+  userNames?: Readonly<Record<string, string>>,
 ): DecompileResult {
   try {
     // 1. Build CFG + detect loops
@@ -394,6 +405,14 @@ export function decompileFunction(
     // 8. Struct synthesis (if registry provided)
     if (registry) {
       irFunc = synthesizeStructs(irFunc, registry, structTap);
+    }
+
+    // 8b. The user's names, over the declarations struct synthesis has read
+    // (`structs.ts` keys `^arg_(\d+)$`) and after the type-based renaming
+    // (so `hFile` is the key the user saw). `typeCtx` is re-keyed too — the
+    // emitter reads types by name.
+    if (userNames) {
+      irFunc = applyUserNames(irFunc, userNames, typeCtx);
     }
 
     // 9. Emit C text + lineMap

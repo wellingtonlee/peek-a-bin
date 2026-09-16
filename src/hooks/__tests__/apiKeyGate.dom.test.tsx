@@ -122,6 +122,7 @@ function DecompileHarness() {
     xrefMap: new Map(),
     functions: [],
     renames: {},
+    varRenames: {},
     buildFunctionAsm: () => "",
   });
   return (
@@ -159,6 +160,7 @@ function DecompileHarnessWithOutOfBandTrigger() {
     xrefMap: new Map(),
     functions: [],
     renames: {},
+    varRenames: {},
     buildFunctionAsm: () => "",
   });
   return (

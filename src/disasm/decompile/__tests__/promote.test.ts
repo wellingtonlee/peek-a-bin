@@ -4,7 +4,7 @@ import { stackVarKey } from "../../stack";
 import type { StackFrame, StackVar } from "../../types";
 import type { IRExpr, IRStmt } from "../ir";
 import { irBinary, irConst, irDeref, irReg, irVar } from "../ir";
-import { promoteVars } from "../promote";
+import { applyUserNames, promoteVars } from "../promote";
 import type { DecompType, TypeContext } from "../typeInfer";
 
 const ADDR = 0x401000;
@@ -1295,5 +1295,137 @@ describe("promoteVars — return type", () => {
       defaultBody: [ret()],
     };
     expect(promote([tryStmt, switchStmt]).returnType).toBe("void");
+  });
+});
+
+// ── User-chosen names (peek-a-bin-5b6q.7) ──
+
+describe("applyUserNames — the user's names over the promoted function", () => {
+  /** A promoted function with one local (`var_8`) and one stack parameter (`arg_0`). */
+  function shell() {
+    const frame = frameOf(
+      stackVar({ name: "var_8", offset: 0x8 }),
+      stackVar({ name: "arg_0", offset: 0x10, signedOffset: 0x10 }),
+    );
+    // `[rbp - 8] = arg_0 + 1; return [rbp - 8]`
+    const body: IRStmt[] = [
+      {
+        kind: "assign",
+        dest: irDeref(irBinary("-", irReg("rbp", 8), irConst(8)), 4),
+        src: irBinary("+", irDeref(irBinary("+", irReg("rbp", 8), irConst(0x10)), 4), irConst(1)),
+      },
+      { kind: "return", value: irDeref(irBinary("-", irReg("rbp", 8), irConst(8)), 4) },
+    ];
+    return promote(body, { frame });
+  }
+
+  /** Every `var` name the body mentions, declarations excluded. */
+  function varNames(fn: ReturnType<typeof shell>): string[] {
+    const out: string[] = [];
+    const walk = (e: IRExpr): void => {
+      if (e.kind === "var") out.push(e.name);
+      else if (e.kind === "binary") {
+        walk(e.left);
+        walk(e.right);
+      } else if (e.kind === "deref") walk(e.address);
+    };
+    for (const st of fn.body) {
+      if (st.kind === "assign") {
+        walk(st.dest);
+        walk(st.src);
+      } else if (st.kind === "return" && st.value) walk(st.value);
+    }
+    return out;
+  }
+
+  it("renames the declaration and every use", () => {
+    const fn = shell();
+    expect(fn.locals.map((l) => l.name)).toEqual(["var_8"]);
+    expect(fn.params.map((p) => p.name)).toEqual(["arg_0"]);
+    const renamed = applyUserNames(fn, { var_8: "total", arg_0: "n" });
+    expect(renamed.locals.map((l) => l.name)).toEqual(["total"]);
+    expect(renamed.params.map((p) => p.name)).toEqual(["n"]);
+    expect(varNames(renamed).sort()).toEqual(["n", "total", "total"]);
+    expect(varNames(renamed)).not.toContain("var_8");
+    // The declared TYPE rides along untouched.
+    expect(renamed.locals[0].type).toBe(fn.locals[0].type);
+  });
+
+  it("does not mutate its input", () => {
+    const fn = shell();
+    const before = JSON.stringify(fn);
+    applyUserNames(fn, { var_8: "total" });
+    expect(JSON.stringify(fn)).toBe(before);
+  });
+
+  it("returns the function itself when nothing applies", () => {
+    const fn = shell();
+    expect(applyUserNames(fn, {})).toBe(fn);
+    expect(applyUserNames(fn, { var_99: "x" })).toBe(fn);
+  });
+
+  it("skips a target that collides with another declared name", () => {
+    const fn = shell();
+    const renamed = applyUserNames(fn, { var_8: "arg_0" });
+    expect(renamed.locals.map((l) => l.name)).toEqual(["var_8"]);
+    // …and one that collides with a name another entry has just taken.
+    const twice = applyUserNames(fn, { arg_0: "x", var_8: "x" });
+    // Key order (`arg_0` < `var_8`): the parameter wins, the local is skipped.
+    expect(twice.params.map((p) => p.name)).toEqual(["x"]);
+    expect(twice.locals.map((l) => l.name)).toEqual(["var_8"]);
+  });
+
+  it("skips a target that is a register name, a keyword, a type or a generated spelling", () => {
+    const fn = shell();
+    for (const target of ["eax", "rbp", "int", "return", "uint32_t", "var_10", "flg_401000_0"]) {
+      expect(applyUserNames(fn, { var_8: target }).locals[0].name, target).toBe("var_8");
+    }
+  });
+
+  it("skips a target that is not a C identifier", () => {
+    const fn = shell();
+    for (const target of ["", "1abc", "a-b", "a b", "count;"]) {
+      expect(applyUserNames(fn, { var_8: target }).locals[0].name, JSON.stringify(target)).toBe(
+        "var_8",
+      );
+    }
+  });
+
+  it("ignores a key that is not a stable identifier class, even if the body declares it", () => {
+    const fn = shell();
+    // A local whose name is a capture spelling is not something the UI could
+    // have keyed on; the map is also asked about `rbp` (a register the body
+    // reads) and an `__unrecovered_` name.
+    fn.locals.push({ name: "flg_401000_0", type: "uint32_t" });
+    const renamed = applyUserNames(fn, { flg_401000_0: "x", rbp: "y", __unrecovered_1: "z" });
+    expect(renamed).toBe(fn);
+  });
+
+  it("re-keys the type context under the new name so the emitter's lookups still hit", () => {
+    const fn = shell();
+    const typeCtx: TypeContext = {
+      types: new Map<string, DecompType>([["var_8", { kind: "handle" }]]),
+    };
+    applyUserNames(fn, { var_8: "h" }, typeCtx);
+    expect(typeCtx.types.get("h")).toEqual({ kind: "handle" });
+  });
+
+  it("accepts a type-based name as the key — the name the user saw", () => {
+    // `promoteVars` renamed `var_8` to `hFile` from its HANDLE type; the key
+    // the panel shows and stores is therefore `hFile`.
+    const frame = frameOf(stackVar({ name: "var_8", offset: 0x8 }));
+    const fn = promote(
+      [
+        {
+          kind: "assign",
+          dest: irReg("eax", 4),
+          src: irDeref(irBinary("-", irReg("rbp", 8), irConst(8)), 4),
+        },
+      ],
+      { frame, typeCtx: { types: new Map<string, DecompType>([["var_8", { kind: "handle" }]]) } },
+    );
+    expect(fn.locals[0].name).toBe("hFile");
+    expect(applyUserNames(fn, { hFile: "hDevice" }).locals[0].name).toBe("hDevice");
+    expect(applyUserNames(fn, { var_8: "hDevice" }).locals[0].name).toBe("hFile");
   });
 });

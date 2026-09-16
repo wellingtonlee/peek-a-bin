@@ -803,6 +803,7 @@ export function DisassemblyView() {
     xrefMap: typedXrefMap,
     functions: state.functions,
     renames: state.renames,
+    varRenames: state.varRenames,
     buildFunctionAsm,
   });
 

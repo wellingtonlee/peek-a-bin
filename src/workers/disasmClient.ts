@@ -673,6 +673,14 @@ class DisasmWorkerClient {
      * numbers; absent or null means no trylevel annotations, as before.
      */
     seh32Scopes?: import("../disasm/seh32").Seh32ScopeTable | null,
+    /**
+     * The user's variable renames for THIS function, `{ var_20: "count" }`,
+     * applied in the pipeline (`applyUserNames`). Sent only when the caller
+     * has some, so a request with none is byte-identical to one from before the
+     * field existed; `prepareBinaryArgs` walks the top level for buffers only,
+     * so a plain object crosses untouched (peek-a-bin-5b6q.7).
+     */
+    userNames?: Readonly<Record<string, string>>,
   ): Promise<{ code: string; lineMap: Map<number, number>; admissions: DecompileAdmissions }> {
     // NO CACHE HERE, AND THAT IS A DELETION. This method used to memoise its
     // reply on the bare function address, with a single caller —
@@ -727,6 +735,7 @@ class DisasmWorkerClient {
       funcExtents: functions?.map((f) => [f.address, f.size] as [number, number]),
       insnsToken: functions ? this.insnsToken(instructions) : undefined,
       seh32Scopes: seh32Scopes ?? undefined,
+      userNames: userNames && Object.keys(userNames).length > 0 ? userNames : undefined,
     });
     type Reply = {
       code: string;

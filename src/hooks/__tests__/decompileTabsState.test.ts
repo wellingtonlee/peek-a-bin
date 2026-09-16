@@ -88,6 +88,30 @@ describe("decompileInputsKey", () => {
       decompileInputsKey({ 0x1: "a\x002=b" }),
     );
   });
+
+  // The other user input the Low Level C is emitted under (peek-a-bin-5b6q.7).
+  it("differs when a variable rename is added, changed or cleared", () => {
+    const none = decompileInputsKey({});
+    const one = decompileInputsKey({}, { var_20: "count" });
+    expect(one).not.toBe(none);
+    expect(decompileInputsKey({}, { var_20: "n" })).not.toBe(one);
+    expect(decompileInputsKey({}, {})).toBe(none);
+    expect(decompileInputsKey({}, undefined)).toBe(none);
+  });
+
+  it("does not depend on the variable renames' insertion order", () => {
+    const a: Record<string, string> = {};
+    a.var_24 = "second";
+    a.var_20 = "first";
+    const b: Record<string, string> = {};
+    b.var_20 = "first";
+    b.var_24 = "second";
+    expect(decompileInputsKey({}, a)).toBe(decompileInputsKey({}, b));
+  });
+
+  it("keeps a function rename and a variable rename apart", () => {
+    expect(decompileInputsKey({ 0x1: "a" })).not.toBe(decompileInputsKey({}, { 1: "a" }));
+  });
 });
 
 describe("low-level cache: results are scoped to the renames they were emitted under", () => {

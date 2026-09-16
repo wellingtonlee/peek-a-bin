@@ -6,16 +6,13 @@ import type { IRCall, IRExpr, IRFunction, IRLocal, IRParam, IRStmt } from "./ir"
 import { bodiesOf, irVar, rewriteBodies, walkStmts } from "./ir";
 import type { TypeContext } from "./typeInfer";
 import { typeToString } from "./typeInfer";
+import { renameableIdentClass, TYPE_BASED_NAMES, validateVarName } from "./userNames";
 
 // ── Type-based variable renaming ──
-
-const TYPE_BASED_NAMES: Record<string, string> = {
-  HANDLE: "hFile",
-  NTSTATUS: "status",
-  HRESULT: "hr",
-  PVOID: "pBuffer",
-  BOOL: "bResult",
-};
+//
+// `TYPE_BASED_NAMES` lives in `userNames.ts`: the browser has to recognise the
+// names this table produces as rename keys, and one table read from two places
+// is how the two cannot disagree.
 
 function renameVarsInExpr(expr: IRExpr, renameMap: Map<string, string>): IRExpr {
   if (expr.kind === "var") {
@@ -58,7 +55,12 @@ function renameVarsInExpr(expr: IRExpr, renameMap: Map<string, string>): IRExpr 
   }
 }
 
-function renameVarsInStmt(stmt: IRStmt, renameMap: Map<string, string>): IRStmt {
+/**
+ * One statement with every `var` in `renameMap` respelled, nested bodies
+ * included. Exported for `applyUserNames` below and nothing else — the
+ * type-based pass at the bottom of `promoteVars` is the other caller.
+ */
+export function renameVarsInStmt(stmt: IRStmt, renameMap: Map<string, string>): IRStmt {
   switch (stmt.kind) {
     case "assign":
       return {
@@ -999,5 +1001,89 @@ export function promoteVars(
     locals,
     body: finalBody,
     is64,
+  };
+}
+
+// ── User-chosen variable names ──
+
+/**
+ * Apply the user's renames to a promoted function: the declaration and every
+ * use, through the same `renameVarsInStmt` the type-based renaming uses.
+ *
+ * IN THE PIPELINE, NOT AT RENDER (peek-a-bin-5b6q.7). A render-time
+ * substitution over the emitted text would have to tell `var_2` from `var_20`,
+ * stay out of string literals and comments, and re-state the collision rule
+ * beside the one the emitter's own declarations already imply; renaming the
+ * IR before emission gets every line, the Copy button, the MCP reply and the
+ * AI tab's input for free, and keeps `lineMap` exact by construction — a name
+ * changes no line count and the map is built after this runs.
+ *
+ * AFTER the type-based renaming, so the key is the name the user saw: a slot
+ * shown as `hFile` is keyed `hFile`, not the `var_18` it was before
+ * `promoteVars` retyped it. Struct synthesis has also run, because `structs.ts`
+ * keys `^arg_(\d+)$` to tell a parameter from a frame pointer and must see the
+ * generated spelling.
+ *
+ * THREE REFUSALS, each a skip and never a throw, applied in key order so the
+ * result does not depend on the map's insertion order:
+ *  1. A key that is not a stable identifier class (`renameableIdentClass`) is
+ *     ignored — `flg_`, `__unrecovered_N`, a register, a `field_` all fall
+ *     here, whatever the browser let through.
+ *  2. A key this function does not declare as a local or parameter is
+ *     ignored: a stale annotation from a build whose `var_20` no longer exists
+ *     must not rename anything else.
+ *  3. A target `validateVarName` refuses against every name the body already
+ *     binds — the other locals and parameters, every `var` and every register
+ *     the statements mention, every callee — is skipped, so two keys aimed at
+ *     one name yield one rename and a name equal to a register is never
+ *     written. The browser asks the same function before dispatching; this is
+ *     the copy that holds when the annotation arrives from a file.
+ *
+ * `typeCtx.types` is keyed by name and read by the emitter for cast
+ * suppression and enum spelling, so the renamed entry is ADDED under the new
+ * name (the old one is left; nothing reads it after this). Without that a
+ * rename would change casts on lines the user did not touch.
+ */
+export function applyUserNames(
+  func: IRFunction,
+  userNames: Readonly<Record<string, string>>,
+  typeCtx?: TypeContext,
+): IRFunction {
+  const declaredLocals = new Set(func.locals.map((l) => l.name));
+  const declaredParams = new Set(func.params.map((p) => p.name));
+  const bound = new Set<string>([...declaredLocals, ...declaredParams]);
+  walkStmts(func.body, (e) => {
+    if (e.kind === "var" || e.kind === "reg") bound.add(e.name);
+    else if (e.kind === "call") bound.add(e.target);
+  });
+
+  const renameMap = new Map<string, string>();
+  for (const key of Object.keys(userNames).sort()) {
+    const target = userNames[key];
+    if (renameableIdentClass(key) === null) continue;
+    if (!declaredLocals.has(key) && !declaredParams.has(key)) continue;
+    if (renameMap.has(key)) continue;
+    // Asked without the key itself: a rename to its own name is a no-op the
+    // browser already turned into a clear, not a collision.
+    const others = new Set(bound);
+    others.delete(key);
+    if (validateVarName(target, others) !== null) continue;
+    renameMap.set(key, target);
+    bound.add(target);
+  }
+  if (renameMap.size === 0) return func;
+
+  const rename = (name: string): string => renameMap.get(name) ?? name;
+  if (typeCtx) {
+    for (const [from, to] of renameMap) {
+      const t = typeCtx.types.get(from);
+      if (t) typeCtx.types.set(to, t);
+    }
+  }
+  return {
+    ...func,
+    params: func.params.map((p) => (renameMap.has(p.name) ? { ...p, name: rename(p.name) } : p)),
+    locals: func.locals.map((l) => (renameMap.has(l.name) ? { ...l, name: rename(l.name) } : l)),
+    body: func.body.map((s) => renameVarsInStmt(s, renameMap)),
   };
 }

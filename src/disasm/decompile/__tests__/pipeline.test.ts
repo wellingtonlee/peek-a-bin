@@ -3539,6 +3539,112 @@ describe("decompileFunction — the stack frame is not a struct", () => {
  * the function was emitted as taking no arguments and the unrecognised slots
  * stayed raw derefs all the way to the output.
  */
+describe("decompileFunction — the user's variable names are applied in the pipeline", () => {
+  /** A 32-bit run with a real frame; `userNames` is the trailing parameter. */
+  function runNamed(instructions: Instruction[], userNames?: Record<string, string>) {
+    const last = instructions[instructions.length - 1];
+    const func: DisasmFunction = {
+      name: "sub_401000",
+      address: instructions[0].address,
+      size: last.address + last.size - instructions[0].address,
+    };
+    return decompileFunction(
+      func,
+      instructions,
+      new Map<number, Xref[]>(),
+      analyzeStackFrame(func, instructions, "x86", false),
+      null,
+      false,
+      new Map(),
+      new Map(),
+      new Map(),
+      new Map(),
+      new StructRegistry(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      userNames,
+    );
+  }
+
+  const PROGRAM = () =>
+    seq(0x401000, [
+      ["push", "ebp"],
+      ["mov", "ebp, esp"],
+      ["sub", "esp, 0x10"],
+      ["mov", "eax, dword ptr [ebp + 8]"],
+      ["mov", "dword ptr [ebp - 4], eax"],
+      ["cmp", "dword ptr [ebp - 4], 0"],
+      ["je", "0x401024"],
+      ["mov", "dword ptr [ebp - 0x10], eax"],
+      ["mov", "eax, dword ptr [ebp - 0x10]"],
+      ["ret"],
+    ]);
+
+  it("renames the declaration, every use and the header parameter", () => {
+    const plain = runNamed(PROGRAM());
+    expect(plain.code).toContain("var_4");
+    expect(plain.code).toContain("arg_0");
+    const renamed = runNamed(PROGRAM(), { var_4: "count", arg_0: "n" });
+    expect(renamed.code).not.toMatch(/\bvar_4\b/);
+    expect(renamed.code).not.toMatch(/\barg_0\b/);
+    expect(renamed.code).toContain("count");
+    expect(renamed.code.split("\n").find((l) => /^\w[^;]*\(/.test(l))).toContain(" n)");
+    // `var_10`, which the map did not name, is untouched.
+    expect(renamed.code).toContain("var_10");
+  });
+
+  it("keeps lineMap EXACT: the renamed run maps line for line onto the plain one", () => {
+    // The exactness claim. A name changes no line count and the map is built
+    // after the rename, so the two maps must be equal as maps — not merely the
+    // same size — and every line must differ ONLY where the names do.
+    const plain = runNamed(PROGRAM());
+    const renamed = runNamed(PROGRAM(), { var_4: "count", arg_0: "n" });
+    expect(renamed.lineMap).toEqual(plain.lineMap);
+    const a = plain.code.split("\n");
+    const b = renamed.code.split("\n");
+    expect(b).toHaveLength(a.length);
+    const respelled = (line: string) =>
+      line.replace(/\bvar_4\b/g, "count").replace(/\barg_0\b/g, "n");
+    a.forEach((line, i) => expect(b[i], `line ${i}`).toBe(respelled(line)));
+    expect(renamed.admissions).toEqual(plain.admissions);
+  });
+
+  it("applies nothing for a refused key class, and the output is byte-identical", () => {
+    const plain = runNamed(PROGRAM()).code;
+    const refusals: Record<string, string>[] = [
+      { eax: "x" }, // a register spelling
+      { __unrecovered_1: "x" },
+      { flg_401014_0: "x" },
+      { field_0x8: "x" },
+      { struct_0: "x" },
+      { var_99: "x" }, // a stable class, but not declared by this function
+    ];
+    for (const refused of refusals) {
+      expect(runNamed(PROGRAM(), refused).code, JSON.stringify(refused)).toBe(plain);
+    }
+  });
+
+  it("skips a target that collides with a declared name or a register, byte-identically", () => {
+    const plain = runNamed(PROGRAM()).code;
+    for (const refused of [
+      { var_4: "var_10" },
+      { var_4: "arg_0" },
+      { var_4: "eax" },
+      { var_4: "int" },
+    ]) {
+      expect(runNamed(PROGRAM(), refused).code, JSON.stringify(refused)).toBe(plain);
+    }
+  });
+
+  it("an empty map is the identity", () => {
+    expect(runNamed(PROGRAM(), {}).code).toBe(runNamed(PROGRAM()).code);
+  });
+});
+
 describe("decompileFunction — stack slots below 0xA", () => {
   /** A 32-bit run with the StackFrame the real caller computes. */
   function runWithStackFrame(instructions: Instruction[]): string {

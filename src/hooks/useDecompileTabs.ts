@@ -43,6 +43,12 @@ interface UseDecompileTabsArgs {
   xrefMap: Map<number, Xref[]>;
   functions: DisasmFunction[];
   renames: Record<number, string>;
+  /**
+   * `state.varRenames`: per function, the user's variable names keyed by the
+   * generated name (peek-a-bin-5b6q.7). Only `varRenames[currentFunc.address]`
+   * is read, sent to the worker and folded into the cache key.
+   */
+  varRenames: Record<number, Record<string, string>>;
   buildFunctionAsm: () => string;
 }
 
@@ -87,6 +93,7 @@ export function useDecompileTabs({
   xrefMap,
   functions,
   renames,
+  varRenames,
   buildFunctionAsm,
 }: UseDecompileTabsArgs): UseDecompileTabsResult {
   const [tabsState, dispatch] = useReducer(tabsReducer, undefined, initialTabsState);
@@ -117,13 +124,18 @@ export function useDecompileTabs({
     }
   }, [pe]);
 
+  // This function's variable renames, or undefined. Read by identity below:
+  // the reducer REPLACES the inner record on every change, so a changed
+  // reference is a changed set (`appReducer`'s replace-never-mutate rule).
+  const funcVarRenames = currentFunc ? varRenames[currentFunc.address] : undefined;
+
   const decompileLow = useCallback(async () => {
     if (!currentFunc || !pe || instructions.length === 0) return;
     const addr = currentFunc.address;
 
     // Computed before the lookup: the renames are part of the key, so a result
     // is only reused while the names it was emitted with are still the names.
-    const inputsKey = decompileInputsKey(renames);
+    const inputsKey = decompileInputsKey(renames, funcVarRenames);
     const cached = readLowCache(lowCache.current, addr, inputsKey);
     if (cached) {
       dispatch({
@@ -171,6 +183,7 @@ export function useDecompileTabs({
         // instruction array (peek-a-bin-s2ws).
         functions,
         seh32Scopes,
+        funcVarRenames,
       );
       writeLowCache(lowCache.current, addr, { ...result, inputsKey });
       dispatch({
@@ -183,7 +196,24 @@ export function useDecompileTabs({
     } catch (err: any) {
       dispatch({ type: "LOAD_ERR", tab: "low", error: err?.message ?? String(err) });
     }
-  }, [currentFunc, pe, instructions, xrefMap, functions, renames]);
+  }, [currentFunc, pe, instructions, xrefMap, functions, renames, funcVarRenames]);
+
+  /**
+   * Re-decompile when THIS function's variable renames change under an open
+   * Low Level tab, so a rename made from the panel reaches the page at once
+   * rather than on the next visit. Keyed on the function address too: a
+   * navigation changes `funcVarRenames` as well, and that case is already
+   * `DisassemblyView`'s (reset + trigger) — firing here as well would race a
+   * second request against the reset. A tab never loaded is left alone.
+   */
+  const varRenamesSeenRef = useRef<{ addr: number; record: unknown } | null>(null);
+  useEffect(() => {
+    if (!currentFunc) return;
+    const seen = varRenamesSeenRef.current;
+    varRenamesSeenRef.current = { addr: currentFunc.address, record: funcVarRenames };
+    if (!seen || seen.addr !== currentFunc.address || seen.record === funcVarRenames) return;
+    if (tabsState.low.ready || tabsState.low.loading) void decompileLow();
+  }, [currentFunc, funcVarRenames, decompileLow, tabsState.low.ready, tabsState.low.loading]);
 
   const decompileHigh = useCallback(async () => {
     if (!currentFunc || !pe) return;

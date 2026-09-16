@@ -104,13 +104,26 @@ export interface LowCacheEntry {
  * separator (a `join` on a delimiter was tried first and its own test found the
  * collision).
  */
-export function decompileInputsKey(renames: Readonly<Record<number, string>>): string {
+export function decompileInputsKey(
+  renames: Readonly<Record<number, string>>,
+  /**
+   * THIS function's variable renames (`state.varRenames[addr]`), the other
+   * user input the Low Level C is emitted under (peek-a-bin-5b6q.7). This
+   * function's alone, unlike the function renames above: a variable name is
+   * local to the body that declares it, so no other function's C can move.
+   * Sorted by key for the same order-independence; absent or empty is one
+   * key, so a cleared rename hits the entry written before it was made.
+   */
+  varRenames?: Readonly<Record<string, string>>,
+): string {
   const pairs: [number, string][] = Object.entries(renames).map(([addr, name]) => [
     Number(addr),
     name,
   ]);
   pairs.sort((a, b) => a[0] - b[0]);
-  return JSON.stringify(pairs);
+  const varPairs: [string, string][] = Object.entries(varRenames ?? {});
+  varPairs.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+  return JSON.stringify([pairs, varPairs]);
 }
 
 /** Cache hit only if the entry was produced under the current inputs. */
