@@ -1577,12 +1577,24 @@ an instrument on `SwitchArmExit`'s terms: `pruneLabels` computes nothing from it
 `structure.test.ts` pins that the tree is the same with and without it.
 
 **Callees that are not names, and x64 stack arguments five and up** (`corpus/callShapes.ts`).
-Two sizes for epic 3, from the machine text and the emitted C together. *Callees:* emitted
-`(*reg)(` **0/0/0/0**, `__unrecovered_N(` in callee position **0/0/0/0**, `indirect jmp through`
-raws 2/0/0/2 — over 328/278/281/331 indirect machine calls of 1590/1419/1352/1523 (133/35/31/123
-through a register). So the `IRCall.targetExpr` population on this corpus is the register calls the
-lifter already spells `(*rax)()`-style at zero sites — every indirect call here is an IAT or
-data-pointer memory operand — and the two register tail jumps. *Stack arguments:* x64 stores to
+Two sizes for epic 3, from the machine text and the emitted C together. *Callees:* every emitted
+indirect callee — `((intptr_t (*)())<target>)(`, read with a **depth-counted** scan, since a target
+can be `*(int32_t*)(eax + 4)` or `((struct_0 *)eax)->field_0x4` — partitioned four ways by what the
+target is: a register, some other named value (`arg_0`, `var_20`, `__imp_X`), an expression, or
+`__unrecovered_N`. **Measured at `5768528`: 137/38/34/127 indirect callees (t32/t64/w64/w32) —
+133/35/31/123 register, 0/3/3/0 named, 0 expression, 4/0/0/4 `__unrecovered_N`** — beside
+`indirect jmp through` raws 2/0/0/2, over 328/278/281/331 indirect machine calls of
+1590/1419/1352/1523. `peek-a-bin-s1f6.1` closed the `__unrecovered_N` column (4/0/0/4 → 0, with
+`named` 0/3/3/0 → 4/3/3/4) by giving `IRCall` a real `targetExpr` for memory operands.
+
+**THE TWO OLD ROWS HERE WERE STRUCTURALLY 0 AND SAID SO WITH CONFIDENCE.** They scanned for
+`(*<ident>)(` and `__unrecovered_N(`, neither of which `emit.ts`'s `calleeText` has ever
+produced — it wraps *every* indirect target in `((intptr_t (*)())…)` — so both read 0/0/0/0 on all
+four binaries and this paragraph used to conclude from that "the `IRCall.targetExpr` population on
+this corpus is … zero sites". Eight call sites were in it. A control that does not discriminate is
+not a control; the liveness half is now `indirectCallees > 0` per binary plus the identity
+`register + named + expression + unrecovered = indirectCallees`, asserted in `corpus.audit.ts`.
+*Stack arguments:* x64 stores to
 `[rsp + 0x20..]` whose NEXT control transfer is a `call` **245/214** (t64/w64) of 469/357 such
 stores, 687/620 reads, over 57/56 functions; the emitted C spells **none** of them as
 `(rsp + 0x20..) =` — it goes through an alias (`r11 = rsp; *(int64_t*)(r11 + 0x20) = …`) or a

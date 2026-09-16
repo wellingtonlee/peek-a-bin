@@ -3,7 +3,7 @@ import { stackVarKey } from "../stack";
 import type { StackFrame } from "../types";
 import { entryBindings } from "./entryBindings";
 import type { IRCall, IRExpr, IRFunction, IRLocal, IRParam, IRStmt } from "./ir";
-import { bodiesOf, irVar, rewriteBodies, walkStmts } from "./ir";
+import { bodiesOf, irVar, mapCallOperands, rewriteBodies, walkStmts } from "./ir";
 import type { TypeContext } from "./typeInfer";
 import { typeToString } from "./typeInfer";
 import { renameableIdentClass, TYPE_BASED_NAMES, validateVarName } from "./userNames";
@@ -32,7 +32,7 @@ function renameVarsInExpr(expr: IRExpr, renameMap: Map<string, string>): IRExpr 
     case "deref":
       return { ...expr, address: renameVarsInExpr(expr.address, renameMap) };
     case "call":
-      return { ...expr, args: expr.args.map((a) => renameVarsInExpr(a, renameMap)) } as IRExpr;
+      return mapCallOperands(expr, (a) => renameVarsInExpr(a, renameMap));
     case "ternary":
       return {
         ...expr,
@@ -473,10 +473,9 @@ function promoteExpr(
         address: promoteExpr(expr.address, is64, varLookup, paramLookup, bpAliases),
       };
     case "call":
-      return {
-        ...expr,
-        args: expr.args.map((a) => promoteExpr(a, is64, varLookup, paramLookup, bpAliases)),
-      };
+      // The target of an indirect call is promoted like any other read, which
+      // is what turns `call dword ptr [ebp + 8]` into a call through `arg_0`.
+      return mapCallOperands(expr, (a) => promoteExpr(a, is64, varLookup, paramLookup, bpAliases));
     case "ternary":
       return {
         ...expr,

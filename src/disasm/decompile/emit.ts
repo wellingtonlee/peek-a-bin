@@ -917,10 +917,19 @@ function collectGlobalWidths(body: readonly IRStmt[], out: Map<number, Set<numbe
  * Only a target already marked indirect is touched. Whatever else arrives (an
  * API name, a `sub_...`) is passed through exactly as before, so no direct call
  * can be turned into an indirect one by a name this misjudges.
+ *
+ * A MEMORY operand no longer falls to the unrecovered arm: `IRCall.targetExpr`
+ * carries the value being called through as an expression, so it has been
+ * versioned, promoted and struct-rewritten like every other read and prints as
+ * whatever it turned out to be — `((intptr_t (*)())arg_0)(…)` where the old
+ * output said `__unrecovered_1` with the raw operand beside it in a comment.
+ * The text arm below still answers a register target and anything the lifter
+ * refused to parse.
  */
-function calleeText(name: string): string {
+function calleeText(name: string, targetExpr?: IRExpr): string {
   const target = indirectCallTarget(name);
   if (target === null) return name;
+  if (targetExpr) return `((intptr_t (*)())${emitExpr(targetExpr, 99)})`;
   let value: string;
   if (!/^[A-Za-z_]\w*$/.test(target)) value = unrecoveredValue(target);
   // A register held as TEXT in the call target is a read of that register
@@ -1976,7 +1985,7 @@ function emitExpr(expr: IRExpr, parentPrec = 0, signed = false): string {
     }
 
     case "call": {
-      const name = calleeText(calleeName(expr));
+      const name = calleeText(calleeName(expr), expr.targetExpr);
       const ioctlArg = ioctlCodeArgIndex(name);
       const args = expr.args
         .map((a, i) => {

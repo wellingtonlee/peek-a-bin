@@ -1450,6 +1450,25 @@ refused. **Read the long-form entry before changing the code it describes.**
   (`lifter.ts`) are the one declaration of the `__imp_` spelling**; epic n9cl's IAT-slot loads must
   reuse it, and `corpus/sweep.ts`'s `emittedCallees` reads the prefix back so `distinct callees
   lost` stays 0.
+- **A CALL'S TARGET IS AN IR READ, and every walker must visit `IRCall.targetExpr`.** A call through
+  a **memory** operand carries the value it transfers through as an `IRExpr`, parsed by the same
+  `parseOperand` as every other operand, so SSA versions it, `promoteVars` rewrites
+  `deref(ebp + 8)` to `arg_0` and `deref(ebp - 0x20)` to `var_20`, and `calleeText` spells
+  `((intptr_t (*)())arg_0)(…)` where it used to report `__unrecovered_N` beside the raw operand
+  text. A bare **register** target keeps today's spelling (`calleeText` already resolves it through
+  the declared register variable). Two refusals, each leaving the old text exactly as it was: the
+  parse must yield a `deref`, and an `unknown` anywhere inside the address refuses the whole
+  operand. **THE COST IS THE WALKER AUDIT** — the field is optional, so a pass that maps `args` and
+  not this one compiles and carries the unmapped expression through, or never counts the read and
+  lets DCE delete the definition the call transfers through (the `rax = (int64_t)GetLastError()`
+  class, measured). **`ir.ts`'s `mapCallOperands` is the one declaration** of the rebuild — the
+  fourteen sites that copy a call go through it — and
+  `decompile/__tests__/callTargetWalkers.test.ts` is the drift guard over the *readers*: every
+  function under `src/disasm/decompile` (and the three `corpus/` replicas) that reads `.args`
+  non-positionally must read `.targetExpr`, with the positional-only exemptions pinned **both
+  ways**. Population at `5768528`: **8 call sites in 6 functions, PE32 only** — and
+  `corpus/callShapes.ts`'s callee census reported **0** for want of matching the one spelling
+  `calleeText` emits, which is why it was repaired in the same change.
 - **A dereferenced constant is named from the DEREF plus the SECTION TABLE, and from nothing else.**
   `*(int32_t*)(0x414620) != 0` is `g_414620 != 0` only when the constant is the address of a
   `deref`/`store` AND `NamingContext.dataRanges` (`decompile/naming.ts`) places it in a data

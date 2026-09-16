@@ -17,6 +17,26 @@ code, not that comment.)
 
 **IR** (`ir.ts`): `IRExpr` union (12 kinds: const, reg, var, binary, unary, deref, call, cast, ternary, field_access, array_access, unknown) + `IRStmt` union (18 kinds including if/while/do_while/for/switch/break/continue/phi/try/**branch**). `IRLabel` carries an optional `note` — a FIELD, not a kind, so it enters no dispatch census; `pipeline.ts`'s `annotateLabels` is the only writer and `emit.ts` the only reader, printing it on the line after the label (see the `baseGenerations` entry below for why a label no `goto` names must stay in the IR untouched).
 
+**`IRCall.targetExpr?: IRExpr` is a FIELD, not a kind, so it enters no dispatch census — and that
+is exactly why it is dangerous** (`peek-a-bin-s1f6.1`). It carries the value an indirect call
+transfers through, for a MEMORY operand only (`call dword ptr [ebp + 8]` holds `deref(ebp + 8)`; a
+bare register target keeps the text spelling in `target`). Because it is optional, every
+`{ ...call, args: call.args.map(f) }` in the tree compiles unchanged and silently carries the
+*unmapped* expression through, and every walker that visits `args` alone silently fails to count a
+read — at which point DCE deletes the definition the call transfers through. The compiler catches
+none of it. Two mechanisms stand in for the `never` assert a new *kind* would get:
+**`ir.ts`'s `mapCallOperands(call, f)` is the one declaration** of the rebuild (the fourteen
+copying sites go through it and no longer touch `.args`), and
+`decompile/__tests__/callTargetWalkers.test.ts` walks the TypeScript AST and fails on any function
+under `src/disasm/decompile` — or in `corpus/{lostDefs,staleReads,popReads}.ts` — that reads
+`.args` on a call non-positionally without reading `.targetExpr`. `IRLabel.note` above is the same
+shape of hazard with a smaller blast radius. Reading sites that must visit it: `ir.ts`'s
+`walkExpr`; `fold.ts`'s `countReads`, `readRegs` and `readsMemory`; `ssa.ts`'s `stmtUses`;
+`ssaopt.ts`'s `countExprUses`; `structs.ts`'s `collectAccessPatterns`; `emit.ts`'s `emitExpr` (via
+`calleeText`'s second parameter). Positional readers — `clobberedByCall`, `collectCallArgSlots`,
+`inferFieldTypesFromUsage`, `inferFromAPICalls` — are exempt by rule, since an index is an argument
+position and a target occupies none.
+
 **`branch` is confined to `liftedBlocks` and never appears in a structured tree — but its *condition* does, and `structureCFG` now takes it as a sixth argument.** `liftBlock` turns a block's trailing conditional jump into an `IRBranch` so its condition is a real IR reader — an SSA version, a reaching definition, a place in every use count — and `pipeline.ts` step 4b lifts every one of them out of `liftedBlocks` into a `Map<blockId, IRBranch>` *before* `structureCFG`, which `extractCondition` prefers over re-parsing `insn.opStr`. Two orderings are load-bearing and neither is obvious:
 
 - The extraction runs **before the tap snapshot**, or the statement-drop audit reports every branch as a dropped statement in each block ending in a conditional jump.

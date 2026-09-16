@@ -2319,6 +2319,8 @@ export function liftBlock(
         target: target.name,
         args,
         display: target.display,
+        // Set only for a memory-operand target; `IRCall.targetExpr` says why.
+        ...(target.targetExpr ? { targetExpr: target.targetExpr } : {}),
         clobbers: calleeClobbersFor(insn, is64, iatMap, calleeClobbers),
       };
       const retReg = is64 ? "rax" : "eax";
@@ -2971,12 +2973,40 @@ function callResult(idiom: CrtIdiom | null, retReg: string): { resultDest?: IREx
   return idiom?.preservesResult ? {} : { resultDest: irReg(retReg) };
 }
 
+/**
+ * The callee of a `call`, and — for a memory operand — the value it transfers
+ * through as an expression.
+ *
+ * Three targets, in the order the evidence gets weaker: a name
+ * (`resolveNamedTarget`: a direct address, a RIP-relative slot, an absolute
+ * `[0x…]`), a register, and anything else. The last is a memory operand, and
+ * until `targetExpr` existed it reached the emitter as raw Capstone text —
+ * `(*dword ptr [ebp + 8])` — which `calleeText` could only report as
+ * unrecovered. It is parsed by the same `parseOperand` every other operand goes
+ * through, so the target participates in SSA, promotion and struct rewriting
+ * and prints as whatever the value turns out to be (`arg_0`, `var_20`).
+ *
+ * TWO REFUSALS, both of which leave the old text exactly as it was:
+ *
+ *  - The parse must yield a `deref`. `parseOperand` falls back to `unknown`
+ *    for an operand with no brackets, and a call target that is not a memory
+ *    access is not this function's business.
+ *  - No `unknown` anywhere inside the address. A segment override or any other
+ *    token the memory grammar does not model would be pasted into the middle of
+ *    a recovered expression, half-claiming a value nothing read. Reporting the
+ *    whole operand as unrecovered is the honest answer for those.
+ *
+ * The register arm is deliberately untouched: `calleeText` already spells
+ * `(*esi)` through the register variable `collectDeclarations` declares, and
+ * giving it an expression would change ~270 emitted call sites across the
+ * corpus to buy nothing.
+ */
 function resolveCallTarget(
   insn: Instruction,
-  _is64: boolean,
+  is64: boolean,
   iatMap: Map<number, { lib: string; func: string }>,
   funcMap: Map<number, { name: string; address: number }>,
-): { name: string; display?: string } {
+): { name: string; display?: string; targetExpr?: IRExpr } {
   const named = resolveNamedTarget(insn, iatMap, funcMap);
   if (named) return named;
 
@@ -2993,7 +3023,18 @@ function resolveCallTarget(
     if (iatMatch) return { name: iatMatch[2], display: insn.comment };
   }
 
-  return { name: `(*${opStr})` };
+  return { name: `(*${opStr})`, targetExpr: memoryCallTarget(opStr, insn, is64) };
+}
+
+/** The `deref` a call's memory operand lifts to, or undefined — see `resolveCallTarget`. */
+function memoryCallTarget(opStr: string, insn: Instruction, is64: boolean): IRExpr | undefined {
+  const parsed = parseOperand(opStr, insn, is64);
+  if (parsed.kind !== "deref") return undefined;
+  let opaque = false;
+  walkExpr(parsed, (e) => {
+    if (e.kind === "unknown") opaque = true;
+  });
+  return opaque ? undefined : parsed;
 }
 
 // ── Argument Collection ──

@@ -168,6 +168,9 @@ function regsIn(e: IRExpr, out: IRReg[]): void {
       return;
     case "call":
       for (const a of e.args) regsIn(a, out);
+      // An indirect call through a memory operand reads that operand's
+      // registers — see `IRCall.targetExpr`.
+      if (e.targetExpr) regsIn(e.targetExpr, out);
       return;
     case "ternary":
       regsIn(e.condition, out);
@@ -200,7 +203,7 @@ function readsOf(stmt: IRStmt): IRReg[] {
       regsIn(stmt.value, out);
       break;
     case "call_stmt":
-      for (const a of stmt.call.args) regsIn(a, out);
+      regsIn(stmt.call, out);
       break;
     case "return":
       if (stmt.value) regsIn(stmt.value, out);
@@ -234,6 +237,7 @@ function varsIn(stmt: IRStmt, out: Set<string>): void {
         return;
       case "call":
         for (const a of e.args) walk(a);
+        if (e.targetExpr) walk(e.targetExpr);
         return;
       case "ternary":
         walk(e.condition);

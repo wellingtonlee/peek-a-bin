@@ -1,5 +1,5 @@
 import type { BinaryOp, IRExpr, IRStmt } from "./ir";
-import { canonReg, irConst } from "./ir";
+import { canonReg, irConst, mapCallOperands } from "./ir";
 
 /** Shallow structural equality for simple expressions (reg, const, var). */
 function exprEq(a: IRExpr, b: IRExpr): boolean {
@@ -511,7 +511,7 @@ function foldExpr(expr: IRExpr): IRExpr {
   }
 
   if (expr.kind === "call") {
-    return { ...expr, args: expr.args.map(foldExpr) };
+    return mapCallOperands(expr, foldExpr);
   }
 
   if (expr.kind === "field_access") {
@@ -595,7 +595,10 @@ function countReads(expr: IRExpr, canon: string): number {
     case "deref":
       return countReads(expr.address, canon);
     case "call":
-      return expr.args.reduce((n, a) => n + countReads(a, canon), 0);
+      return (
+        expr.args.reduce((n, a) => n + countReads(a, canon), 0) +
+        (expr.targetExpr ? countReads(expr.targetExpr, canon) : 0)
+      );
     case "ternary":
       return (
         countReads(expr.condition, canon) +
@@ -623,7 +626,7 @@ function countReadsInStmt(stmt: IRStmt, canon: string): number {
     case "store":
       return countReads(stmt.address, canon) + countReads(stmt.value, canon);
     case "call_stmt":
-      return stmt.call.args.reduce((n, a) => n + countReads(a, canon), 0);
+      return countReads(stmt.call, canon);
     case "return":
       return stmt.value ? countReads(stmt.value, canon) : 0;
     // Counted, so a definition whose only remaining reader is the guard is
@@ -652,7 +655,7 @@ function substituteReg(expr: IRExpr, canon: string, replacement: IRExpr): IRExpr
     case "deref":
       return { ...expr, address: substituteReg(expr.address, canon, replacement) };
     case "call":
-      return { ...expr, args: expr.args.map((a) => substituteReg(a, canon, replacement)) };
+      return mapCallOperands(expr, (a) => substituteReg(a, canon, replacement));
     case "ternary":
       return {
         ...expr,
@@ -696,10 +699,7 @@ function substituteRegInStmt(stmt: IRStmt, canon: string, replacement: IRExpr): 
     case "call_stmt":
       return {
         ...stmt,
-        call: {
-          ...stmt.call,
-          args: stmt.call.args.map((a) => substituteReg(a, canon, replacement)),
-        },
+        call: mapCallOperands(stmt.call, (a) => substituteReg(a, canon, replacement)),
       };
     case "return":
       return stmt.value ? { ...stmt, value: substituteReg(stmt.value, canon, replacement) } : stmt;
@@ -777,6 +777,8 @@ function readRegs(expr: IRExpr, out: Set<string> = new Set()): Set<string> {
       break;
     case "call":
       for (const a of expr.args) readRegs(a, out);
+      // An indirect call reads the value it transfers through.
+      if (expr.targetExpr) readRegs(expr.targetExpr, out);
       break;
     case "ternary":
       readRegs(expr.condition, out);
@@ -807,7 +809,11 @@ function readsMemory(expr: IRExpr): boolean {
     case "cast":
       return readsMemory(expr.operand);
     case "call":
-      return expr.args.some(readsMemory);
+      // A memory-operand target IS a load, whatever the arguments are.
+      return (
+        expr.args.some(readsMemory) ||
+        (expr.targetExpr !== undefined && readsMemory(expr.targetExpr))
+      );
     case "ternary":
       return readsMemory(expr.condition) || readsMemory(expr.then) || readsMemory(expr.else);
     default:
@@ -845,7 +851,7 @@ function readsInStmt(stmt: IRStmt, out: Set<string>): void {
       readRegs(stmt.value, out);
       return;
     case "call_stmt":
-      for (const a of stmt.call.args) readRegs(a, out);
+      readRegs(stmt.call, out);
       return;
     case "return":
       if (stmt.value) readRegs(stmt.value, out);

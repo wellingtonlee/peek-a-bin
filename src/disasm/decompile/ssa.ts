@@ -1,6 +1,6 @@
 import type { BasicBlock } from "../cfg";
 import type { IRExpr, IRPhi, IRStmt } from "./ir";
-import { canonReg, irReg } from "./ir";
+import { canonReg, irReg, mapCallOperands } from "./ir";
 
 export interface SSAContext {
   blocks: BasicBlock[];
@@ -339,6 +339,8 @@ function stmtUses(s: IRStmt): Set<string> {
     }
     if (e.kind === "call") {
       e.args.forEach(walk);
+      // The value an indirect call transfers through is live into the call.
+      if (e.targetExpr) walk(e.targetExpr);
       return;
     }
     if (e.kind === "ternary") {
@@ -371,7 +373,7 @@ function stmtUses(s: IRStmt): Set<string> {
       walk(s.value);
       break;
     case "call_stmt":
-      s.call.args.forEach(walk);
+      walk(s.call);
       break;
     case "return":
       if (s.value) walk(s.value);
@@ -535,7 +537,7 @@ export function renameVariables(
       case "deref":
         return { ...expr, address: renameExpr(expr.address) };
       case "call":
-        return { ...expr, args: expr.args.map(renameExpr) };
+        return mapCallOperands(expr, renameExpr);
       case "ternary":
         return {
           ...expr,
@@ -612,7 +614,7 @@ export function renameVariables(
         case "call_stmt": {
           // Arguments are renamed first, so they still read the versions that
           // reached the call site; the clobber applies to everything after it.
-          const call = { ...stmt.call, args: stmt.call.args.map(renameExpr) };
+          const call = mapCallOperands(stmt.call, renameExpr);
           let resultDest = stmt.resultDest;
           let resultCanon: string | null = null;
           if (resultDest?.kind === "reg") {

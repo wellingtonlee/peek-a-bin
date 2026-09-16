@@ -3,7 +3,14 @@
 // cast-of-call def was deleted along with the call.
 import { hasSideEffects } from "./fold";
 import type { IRExpr, IRPhi, IRReg, IRStmt } from "./ir";
-import { canonReg, isKnownRegister, pushBeforeTerminator, regSize, walkStmts } from "./ir";
+import {
+  canonReg,
+  isKnownRegister,
+  mapCallOperands,
+  pushBeforeTerminator,
+  regSize,
+  walkStmts,
+} from "./ir";
 import type { SSAContext } from "./ssa";
 
 function sameReg(a: IRReg, b: IRReg): boolean {
@@ -31,7 +38,7 @@ function replaceRegInExpr(expr: IRExpr, oldReg: IRReg, newVal: IRExpr): IRExpr {
     case "deref":
       return { ...expr, address: replaceRegInExpr(expr.address, oldReg, newVal) };
     case "call":
-      return { ...expr, args: expr.args.map((a) => replaceRegInExpr(a, oldReg, newVal)) };
+      return mapCallOperands(expr, (a) => replaceRegInExpr(a, oldReg, newVal));
     case "ternary":
       return {
         ...expr,
@@ -76,10 +83,7 @@ function replaceRegInStmt(stmt: IRStmt, oldReg: IRReg, newVal: IRExpr): IRStmt {
     case "call_stmt":
       return {
         ...stmt,
-        call: {
-          ...stmt.call,
-          args: stmt.call.args.map((a) => replaceRegInExpr(a, oldReg, newVal)),
-        },
+        call: mapCallOperands(stmt.call, (a) => replaceRegInExpr(a, oldReg, newVal)),
       };
     case "return":
       return stmt.value ? { ...stmt, value: replaceRegInExpr(stmt.value, oldReg, newVal) } : stmt;
@@ -304,7 +308,12 @@ export function deadCodeElimination(ctx: SSAContext): boolean {
     }
     if (expr.kind === "unary") countExprUses(expr.operand);
     if (expr.kind === "deref") countExprUses(expr.address);
-    if (expr.kind === "call") expr.args.forEach(countExprUses);
+    if (expr.kind === "call") {
+      expr.args.forEach(countExprUses);
+      // The target of an indirect call is a use. Without it DCE deletes the
+      // definition the call transfers through — see `IRCall.targetExpr`.
+      if (expr.targetExpr) countExprUses(expr.targetExpr);
+    }
     if (expr.kind === "ternary") {
       countExprUses(expr.condition);
       countExprUses(expr.then);
@@ -329,7 +338,7 @@ export function deadCodeElimination(ctx: SSAContext): boolean {
         countExprUses(s.value);
         break;
       case "call_stmt":
-        s.call.args.forEach(countExprUses);
+        countExprUses(s.call);
         break;
       case "return":
         if (s.value) countExprUses(s.value);

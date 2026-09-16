@@ -3,6 +3,7 @@ import type { IRExpr, IRReg, IRStmt } from "./ir";
 import {
   canonReg,
   isKnownRegister,
+  mapCallOperands,
   pushBeforeTerminator,
   regAtSize,
   regSize,
@@ -1063,7 +1064,7 @@ function mapReads(stmt: IRStmt, f: (reg: IRReg) => IRExpr | null): IRStmt {
     case "store":
       return { ...stmt, address: expr(stmt.address), value: expr(stmt.value) };
     case "call_stmt":
-      return { ...stmt, call: { ...stmt.call, args: stmt.call.args.map(expr) } };
+      return { ...stmt, call: mapCallOperands(stmt.call, expr) };
     case "return":
       return stmt.value ? { ...stmt, value: expr(stmt.value) } : stmt;
     // A guard's registers are reads like any others, so `splitStaleReads` can
@@ -1098,7 +1099,7 @@ function mapRegs(expr: IRExpr, f: (reg: IRReg) => IRExpr | null): IRExpr {
     case "deref":
       return { ...expr, address: mapRegs(expr.address, f) };
     case "call":
-      return { ...expr, args: expr.args.map((a) => mapRegs(a, f)) };
+      return mapCallOperands(expr, (a) => mapRegs(a, f));
     case "ternary":
       return {
         ...expr,
@@ -1135,7 +1136,7 @@ function stripVersionsExpr(expr: IRExpr): IRExpr {
     case "deref":
       return { ...expr, address: stripVersionsExpr(expr.address) };
     case "call":
-      return { ...expr, args: expr.args.map(stripVersionsExpr) };
+      return mapCallOperands(expr, stripVersionsExpr);
     case "ternary":
       return {
         ...expr,
@@ -1172,7 +1173,7 @@ function stripVersionsStmt(stmt: IRStmt): IRStmt {
         value: stripVersionsExpr(stmt.value),
       };
     case "call_stmt": {
-      const call = { ...stmt.call, args: stmt.call.args.map(stripVersionsExpr) };
+      const call = mapCallOperands(stmt.call, stripVersionsExpr);
       const resultDest = stmt.resultDest ? stripVersionsExpr(stmt.resultDest) : undefined;
       return { ...stmt, call: call as typeof stmt.call, resultDest };
     }

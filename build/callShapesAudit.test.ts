@@ -10,8 +10,19 @@
  *     `call` — a `ret` or a `jmp` in between disqualifies it.
  *   - the same operand as a SOURCE is a read, not a store.
  *   - on x86 the slot rows are structurally 0 whatever the operands say.
- *   - the emitted-text half counts `(*reg)(`, `__unrecovered_N(` and
- *     `indirect jmp through`, and tells a `(rsp + 0x20) =` store from a read.
+ *   - the emitted-text half counts every `((intptr_t (*)())<target>)(` — the
+ *     ONE spelling `emit.ts`'s `calleeText` produces — partitions it by what
+ *     the target is, counts `indirect jmp through`, and tells a
+ *     `(rsp + 0x20) =` store from a read.
+ *
+ * **THE CALLEE FIXTURE USED TO BE WRITTEN IN A SPELLING THE EMITTER HAS NEVER
+ * PRODUCED** — `(*rax)(rcx, rdx);` and `__unrecovered_3(rcx);` — so the scan it
+ * validated was a structural 0 on all four corpus binaries while eight real
+ * call sites sat in the population it was supposed to size, and
+ * `corpus/README.md` quoted that 0 as evidence that the population was empty
+ * (`peek-a-bin-s1f6.1`). The fixture is the emitter's own output now, and the
+ * last row below pins that the two fictional spellings count for NOTHING, so
+ * the fiction cannot come back as a passing test.
  */
 import { describe, expect, it } from "vitest";
 import { auditCallShapes, emptyCallShapes } from "../corpus/callShapes";
@@ -91,23 +102,49 @@ describe("call shapes", () => {
       [],
       [
         "int f(void) {",
-        "    (*rax)(rcx, rdx);",
-        "    __unrecovered_3(rcx);",
+        "    ((intptr_t (*)())rax)(rcx, rdx);",
+        "    ((intptr_t (*)())arg_0)();",
+        "    ((intptr_t (*)())__imp_RtlUnwindEx)();",
+        "    ((intptr_t (*)())*(int32_t*)(eax + 4))(rcx);",
+        "    ((intptr_t (*)())((struct_0 *)eax)->field_0x4)();",
+        "    ((intptr_t (*)())__unrecovered_3 /* dword ptr [ebp + notareg] */)(rcx);",
         "    /* indirect jmp through esi */",
         "    *(int64_t*)(rsp + 0x20) = r9;",
         "    *(int64_t*)(rsp + 0x18) = r8;",
         "    rcx = *(int64_t*)(rsp + 0x28);",
         "    if (*(int64_t*)(rsp + 0x30) == 0) {",
         "    }",
-        "    // (*rbx)(); a commented-out line is not a call",
+        "    // ((intptr_t (*)())rbx)(); a commented-out line is not a call",
         "}",
       ].join("\n"),
       true,
     );
+    // Two targets carry their own parentheses, which is why the scan is
+    // depth-counted rather than anchored on the first `)`.
+    expect(r.indirectCallees).toBe(6);
     expect(r.registerCallees).toBe(1);
+    expect(r.namedCallees).toBe(2);
+    expect(r.exprCallees).toBe(2);
     expect(r.unrecoveredCallees).toBe(1);
+    expect(r.registerCallees + r.namedCallees + r.exprCallees + r.unrecoveredCallees).toBe(
+      r.indirectCallees,
+    );
     expect(r.indirectJmpRaws).toBe(1);
     expect(r.textSlotStores).toBe(1);
     expect(r.textSlotReads).toBe(2);
+  });
+
+  /**
+   * The spellings the old fixture was written in. `calleeText` wraps EVERY
+   * indirect target in `((intptr_t (*)())…)`, so neither can occur in emitted
+   * C — and a scan that looks for them reports a confident zero over a
+   * non-empty population (`peek-a-bin-s1f6.1`).
+   */
+  it("counts nothing for the spellings the emitter never produces", () => {
+    const r = emptyCallShapes();
+    auditCallShapes(r, [], ["    (*rax)(rcx);", "    __unrecovered_3(rcx);"].join("\n"), true);
+    expect(r.indirectCallees).toBe(0);
+    expect(r.registerCallees).toBe(0);
+    expect(r.unrecoveredCallees).toBe(0);
   });
 });

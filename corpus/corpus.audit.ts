@@ -1602,6 +1602,16 @@ if (!pre.haveBins || !pre.haveCc) {
           `${r.key}: insns=true calls=true`,
         );
         expect(cs.indirectRegCalls).toBeLessThanOrEqual(cs.indirectCalls);
+        // The four callee shapes partition the emitted indirect callees, and
+        // there IS at least one on every binary — the row that sized
+        // `IRCall.targetExpr` was a structural 0 for want of matching the one
+        // spelling `calleeText` produces (peek-a-bin-s1f6.1).
+        expect(`${r.key}: indirectCallees=${cs.indirectCallees > 0}`).toBe(
+          `${r.key}: indirectCallees=true`,
+        );
+        expect(cs.registerCallees + cs.namedCallees + cs.exprCallees + cs.unrecoveredCallees).toBe(
+          cs.indirectCallees,
+        );
         expect(cs.slotStoresBeforeCall).toBeLessThanOrEqual(cs.slotStores);
         if (!r.is64) {
           expect(cs.slotStores).toBe(0);
@@ -2382,9 +2392,11 @@ function renderReport(): string {
     L.push("    resets every key at a label no goto names. Per function in labels_<bin>.jsonl.");
     const cs = r.callShapes;
     L.push(
-      `  callees that are not names  ${cs.registerCallees} (*reg)() emitted, ${cs.unrecoveredCallees} ` +
-        `__unrecovered_N(), ${cs.indirectJmpRaws} indirect-jmp raws, over ${cs.indirectCalls} ` +
-        `indirect of ${cs.calls} machine calls (${cs.indirectRegCalls} through a register) — REPORT-ONLY`,
+      `  callees that are not names  ${cs.indirectCallees} indirect callees emitted: ` +
+        `${cs.registerCallees} register, ${cs.namedCallees} named, ${cs.exprCallees} expression, ` +
+        `${cs.unrecoveredCallees} __unrecovered_N; ${cs.indirectJmpRaws} indirect-jmp raws, over ` +
+        `${cs.indirectCalls} indirect of ${cs.calls} machine calls ` +
+        `(${cs.indirectRegCalls} through a register) — REPORT-ONLY`,
     );
     L.push(
       `  x64 stack args (slot 5+)    ${cs.slotStoresBeforeCall} stores to [rsp+0x20..] before a call ` +

@@ -50,10 +50,16 @@ export interface CallShapeResult {
   indirectCalls: number;
   /** Of those, a bare register operand — the `(*rax)()` population. */
   indirectRegCalls: number;
-  /** Emitted `(*<identifier>)(` call sites. */
+  /** Every emitted indirect callee — `((intptr_t (*)())<target>)(`. The four rows below partition it. */
+  indirectCallees: number;
+  /** Of those, the target is a register name. */
   registerCallees: number;
-  /** Emitted `__unrecovered_N(` in callee position. */
+  /** Of those, the target is `__unrecovered_N` — the value the emitter could not name. */
   unrecoveredCallees: number;
+  /** Of those, the target is some OTHER identifier: `arg_0`, `var_20`, `__imp_X`. */
+  namedCallees: number;
+  /** Of those, the target is not an identifier at all — a deref, a field access. */
+  exprCallees: number;
   /** Emitted `indirect jmp through <reg>` raws. */
   indirectJmpRaws: number;
   /** x64 only: machine stores to `[rsp + disp]`, disp ≥ 0x20. */
@@ -76,8 +82,11 @@ export const emptyCallShapes = (): CallShapeResult => ({
   calls: 0,
   indirectCalls: 0,
   indirectRegCalls: 0,
+  indirectCallees: 0,
   registerCallees: 0,
   unrecoveredCallees: 0,
+  namedCallees: 0,
+  exprCallees: 0,
   indirectJmpRaws: 0,
   slotStores: 0,
   slotStoresBeforeCall: 0,
@@ -93,6 +102,41 @@ export const X64_FIRST_STACK_ARG = 0x20;
 const REGISTER =
   /^(?:r(?:ax|bx|cx|dx|si|di|bp|sp)|e(?:ax|bx|cx|dx|si|di|bp|sp)|r(?:8|9|1[0-5])d?)$/i;
 const RSP_SLOT = /\[rsp \+ 0x([0-9a-f]+)\]/i;
+const IDENTIFIER = /^[A-Za-z_]\w*$/;
+
+/** How `emit.ts`'s `calleeText` opens an indirect callee. THE spelling — it has only one. */
+const CALLEE_PREFIX = "((intptr_t (*)())";
+
+/**
+ * The target text of every indirect callee on one emitted line.
+ *
+ * DEPTH-COUNTED, not anchored on the first `)`. The old patterns here
+ * (`(*<ident>)(` and `__unrecovered_N(`) matched spellings `calleeText` has
+ * NEVER produced — it wraps every indirect target in `CALLEE_PREFIX` — so both
+ * rows read a structural 0 on all four binaries and the census that was
+ * supposed to SIZE `IRCall.targetExpr` said the population was empty while
+ * eight call sites sat in it (`peek-a-bin-s1f6.1`). A non-discriminating
+ * control is not a control. The targets that need counting today include
+ * `*(int32_t*)(eax + 4)` and `((struct_0 *)eax)->field_0x4`, both of which
+ * carry their own parentheses, so the scan balances them.
+ */
+function indirectCalleeTargets(line: string): string[] {
+  const out: string[] = [];
+  for (let i = line.indexOf(CALLEE_PREFIX); i >= 0; i = line.indexOf(CALLEE_PREFIX, i + 1)) {
+    let depth = 0;
+    let end = -1;
+    for (let j = i; j < line.length; j++) {
+      if (line[j] === "(") depth++;
+      else if (line[j] === ")" && --depth === 0) {
+        end = j;
+        break;
+      }
+    }
+    if (end < 0) continue;
+    out.push(line.slice(i + CALLEE_PREFIX.length, end).trim());
+  }
+  return out;
+}
 
 /** Capstone's operands, split at the commas that separate them — none is inside a memory operand. */
 const operandsOf = (opStr: string): string[] =>
@@ -151,8 +195,13 @@ export function auditCallShapes(
   for (const raw of code.split("\n")) {
     const line = raw.trim();
     if (line.startsWith("//")) continue;
-    res.registerCallees += (line.match(/\(\*[A-Za-z_]\w*\)\s*\(/g) ?? []).length;
-    res.unrecoveredCallees += (line.match(/\b__unrecovered_\d+\s*\(/g) ?? []).length;
+    for (const target of indirectCalleeTargets(line)) {
+      res.indirectCallees++;
+      if (target.startsWith("__unrecovered_")) res.unrecoveredCallees++;
+      else if (!IDENTIFIER.test(target)) res.exprCallees++;
+      else if (REGISTER.test(target)) res.registerCallees++;
+      else res.namedCallees++;
+    }
     if (/indirect jmp through/.test(line)) res.indirectJmpRaws++;
     for (const m of line.matchAll(/\(rsp \+ 0x([0-9A-Fa-f]+)\)(\s*=(?!=))?/g)) {
       if (Number.parseInt(m[1], 16) < X64_FIRST_STACK_ARG) continue;

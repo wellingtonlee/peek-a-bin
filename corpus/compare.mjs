@@ -1209,7 +1209,10 @@ for (const b of bins) {
   // Callees that are not names, and x64 stack-argument stores. Both size
   // epic 3 and are report-only in both directions.
   if (B.callShapes && C.callShapes) {
-    row("callees spelled (*reg)()", (x) => x.callShapes.registerCallees);
+    row("indirect callees emitted", (x) => x.callShapes.indirectCallees);
+    row("  through a register", (x) => x.callShapes.registerCallees);
+    row("  through a named value", (x) => x.callShapes.namedCallees);
+    row("  through an expression", (x) => x.callShapes.exprCallees);
     row("  __unrecovered_N in callee position", (x) => x.callShapes.unrecoveredCallees);
     row("  indirect-jmp raws", (x) => x.callShapes.indirectJmpRaws);
     row("  indirect machine calls", (x) => x.callShapes.indirectCalls);

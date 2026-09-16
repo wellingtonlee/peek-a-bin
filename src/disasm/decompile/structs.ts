@@ -8,6 +8,7 @@ import {
   irConst,
   irFieldAccess,
   irReg,
+  mapCallOperands,
   walkExpr,
   walkStmts,
 } from "./ir";
@@ -1240,7 +1241,7 @@ function collectAccessPatterns(body: IRStmt[]): AccessPattern[] {
           walkExprs(s.value);
           break;
         case "call_stmt":
-          for (const a of s.call.args) walkExprs(a);
+          walkExprs(s.call);
           break;
         case "return":
           if (s.value) walkExprs(s.value);
@@ -1289,6 +1290,9 @@ function collectAccessPatterns(body: IRStmt[]): AccessPattern[] {
         break;
       case "call":
         for (const a of expr.args) walkExprs(a);
+        // A `call [rax + 0x10]` accesses the object RAX points at like any
+        // other read of it.
+        if (expr.targetExpr) walkExprs(expr.targetExpr);
         break;
       case "cast":
         walkExprs(expr.operand);
@@ -2457,7 +2461,7 @@ function rewriteExpr(
     case "unary":
       return { ...expr, operand: rewriteExpr(expr.operand, baseToStruct, canonBase) };
     case "call":
-      return { ...expr, args: expr.args.map((a) => rewriteExpr(a, baseToStruct, canonBase)) };
+      return mapCallOperands(expr, (a) => rewriteExpr(a, baseToStruct, canonBase));
     case "cast":
       return { ...expr, operand: rewriteExpr(expr.operand, baseToStruct, canonBase) };
     case "ternary":

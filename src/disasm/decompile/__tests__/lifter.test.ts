@@ -3031,3 +3031,65 @@ describe("liftBlock — a recognised routine with NO register signature keeps th
     expect(call.resultDest).toBeUndefined();
   });
 });
+
+/**
+ * peek-a-bin-s1f6.1 — a call through a MEMORY operand carries the value it
+ * transfers through as an expression.
+ *
+ * `IRCall.target` is a string, so until this existed the operand was outside
+ * the IR: nothing versioned it, nothing promoted it, and nothing counted it as
+ * a read. `resolveCallTarget` parses it with the same `parseOperand` every
+ * other operand goes through — see `IRCall.targetExpr`.
+ */
+describe("liftBlock — a memory-operand call target is an expression", () => {
+  const callOf = (stmts: IRStmt[]) => {
+    const s = stmts.find((x) => x.kind === "call_stmt");
+    if (s?.kind !== "call_stmt") throw new Error("no call_stmt");
+    return s.call;
+  };
+
+  it("lifts `call dword ptr [ebp + 8]` to a deref of the frame slot", () => {
+    const call = callOf(lift([["call", "dword ptr [ebp + 8]"]], { is64: false }));
+
+    expect(call.targetExpr).toEqual(irDeref(irBinary("+", irReg("ebp"), irConst(8, 4)), 4));
+    // The text spelling is unchanged, so nothing that reads `target` moves.
+    expect(call.target).toBe("(*dword ptr [ebp + 8])");
+  });
+
+  it("carries the operand's width", () => {
+    const call = callOf(lift([["call", "qword ptr [rax + 0x10]"]], { is64: true }));
+
+    expect(call.targetExpr).toEqual(irDeref(irBinary("+", irReg("rax"), irConst(0x10, 8)), 8));
+  });
+
+  it("leaves a register target alone", () => {
+    const call = callOf(lift([["call", "rsi"]], { is64: true }));
+
+    expect(call.targetExpr).toBeUndefined();
+    expect(call.target).toBe("(*rsi)");
+  });
+
+  it("leaves a direct call alone", () => {
+    const call = callOf(
+      lift([["call", "0x401800"]], {
+        is64: true,
+        funcs: new Map([[0x401800, { name: "sub_401800", address: 0x401800 }]]),
+      }),
+    );
+
+    expect(call.targetExpr).toBeUndefined();
+    expect(call.target).toBe("sub_401800");
+  });
+
+  /**
+   * The refusal. A token the memory grammar does not model becomes
+   * `irUnknown`, and half a recovered expression around one would claim a value
+   * nothing read — so the whole operand stays unrecovered text, exactly as
+   * before.
+   */
+  it("refuses an address it could not fully parse", () => {
+    const call = callOf(lift([["call", "dword ptr [ebp + notareg]"]], { is64: false }));
+
+    expect(call.targetExpr).toBeUndefined();
+  });
+});

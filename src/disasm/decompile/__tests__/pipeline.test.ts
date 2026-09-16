@@ -1896,12 +1896,146 @@ describe("decompileFunction — indirect calls", () => {
   });
 
   it("reports a target it could not parse rather than pasting the operand in", () => {
+    // `notareg` is not a register, so the memory grammar leaves an `unknown`
+    // in the address and `resolveCallTarget` refuses the whole operand — see
+    // `IRCall.targetExpr`. This is what every memory target used to do.
+    const code = run(seq(0x401000, [["call", "dword ptr [ebp + notareg]"], ["ret"]]));
+
+    expect(code).not.toContain("dword ptr [ebp + notareg])(");
+    expect(code).toMatch(
+      /\(\(intptr_t \(\*\)\(\)\)__unrecovered_\d+ \/\* dword ptr \[ebp \+ notareg\] \*\/\)/,
+    );
+  });
+
+  it("spells a memory target as the expression it is", () => {
     const code = run(seq(0x401000, [["call", "dword ptr [ebp + 8]"], ["ret"]]));
 
-    expect(code).not.toContain("dword ptr [ebp + 8])(");
-    expect(code).toMatch(
-      /\(\(intptr_t \(\*\)\(\)\)__unrecovered_\d+ \/\* dword ptr \[ebp \+ 8\] \*\/\)/,
+    expect(code).not.toContain("__unrecovered");
+    expect(code).toContain("((intptr_t (*)())*(int32_t*)(ebp + 8))(");
+  });
+});
+
+/**
+ * peek-a-bin-s1f6.1 — a call through a memory operand names the value it
+ * transfers through.
+ *
+ * `t32!sub_40333D` emitted
+ * `((intptr_t (*)())__unrecovered_1 /* dword ptr [ebp + 8] *\/)(eax_9, arg_3, arg_4)`
+ * — an admission of failure printed beside the very information that answers
+ * it. `[ebp + 8]` under a recovered frame IS the function's first parameter,
+ * and the only reason the emitter could not say so is that `IRCall.target` is
+ * a string: the operand never entered the IR, so no pass renamed it, promoted
+ * it or counted it as a read. `IRCall.targetExpr` puts it in.
+ *
+ * Eight call sites in the four-binary corpus at `5768528` — four on each PE32
+ * binary, none at all on either x64 one, where every indirect call goes through
+ * a register. Small, and exercised nowhere else: the walker audit below is the
+ * part that matters.
+ */
+describe("decompileFunction — a memory-operand call target is an ordinary read", () => {
+  /** 32-bit, with the StackFrame the real caller computes, so `[ebp+N]` promotes. */
+  function run32(instructions: Instruction[]): string {
+    const last = instructions[instructions.length - 1];
+    const func: DisasmFunction = {
+      name: "sub_401000",
+      address: instructions[0].address,
+      size: last.address + last.size - instructions[0].address,
+    };
+    return decompileFunction(
+      func,
+      instructions,
+      new Map<number, Xref[]>(),
+      analyzeStackFrame(func, instructions, "x86", false),
+      null,
+      false,
+      new Map(),
+      new Map(),
+      new Map(),
+      new Map(),
+      new StructRegistry(),
+    ).code;
+  }
+
+  const FRAME: [string, string?][] = [
+    ["push", "ebp"],
+    ["mov", "ebp, esp"],
+    ["sub", "esp, 0x40"],
+  ];
+
+  it("calls through the parameter when the target is `[ebp + 8]`", () => {
+    const code = run32(
+      seq(0x401000, [
+        ...FRAME,
+        ["push", "0x1"],
+        ["call", "dword ptr [ebp + 8]"],
+        ["mov", "esp, ebp"],
+        ["pop", "ebp"],
+        ["ret"],
+      ]),
     );
+
+    // The witness, one level of recovery up: the target IS arg_0.
+    expect(code).toContain("((intptr_t (*)())arg_0)(");
+    expect(code).not.toContain("__unrecovered");
+    // …and the header declares it, so the name the call uses is a real one.
+    expect(code).toMatch(/int sub_401000\(int32_t arg_0\)/);
+  });
+
+  it("calls through the local when the target is a frame slot", () => {
+    const code = run32(
+      seq(0x401000, [
+        ...FRAME,
+        ["mov", "dword ptr [ebp - 0x20], eax"],
+        ["call", "dword ptr [ebp - 0x20]"],
+        ["mov", "esp, ebp"],
+        ["pop", "ebp"],
+        ["ret"],
+      ]),
+    );
+
+    expect(code).toContain("((intptr_t (*)())var_20)(");
+    expect(code).not.toContain("__unrecovered");
+  });
+
+  it("leaves a register target spelled exactly as it was", () => {
+    const code = run32(seq(0x401000, [["mov", "esi, 0x402000"], ["call", "esi"], ["ret"]]));
+
+    expect(code).toContain("((intptr_t (*)())esi)(");
+  });
+
+  /**
+   * THE WALKER AUDIT, end to end. `esi` is defined by a `lea` — not a copy, so
+   * copy propagation leaves it — and its ONLY reader is the call's target. With
+   * the target counted as a read the definition survives and the call goes
+   * through it; with one walker blind to the target, dead-code elimination
+   * deletes both it and the call result feeding it, and the emitted C calls
+   * through a declared name nothing ever assigns.
+   *
+   * MEASURED as a control rather than asserted on trust: removing the
+   * `targetExpr` arm from `ssaopt.ts`'s `countExprUses` turns this function into
+   *
+   *     int32_t esi;
+   *     sub_408000();
+   *     return ((intptr_t (*)())*(int32_t*)(esi + 4))();
+   *
+   * — the `rax = (int64_t)GetLastError()` class exactly, one level down.
+   */
+  it("keeps a definition whose only reader is the call's target", () => {
+    const code = run32(
+      seq(0x401000, [
+        ["call", "0x408000"],
+        ["lea", "esi, [eax + 0x20]"],
+        ["call", "dword ptr [esi + 4]"],
+        ["ret"],
+      ]),
+    );
+
+    // The call's result is captured, because the target reads it…
+    expect(code).toMatch(/eax = sub_408000\(\);/);
+    // …and the transfer goes through that value, not through a name with no
+    // assignment anywhere in the function.
+    expect(code).toContain("((intptr_t (*)())*(int32_t*)(eax + 0x20 + 4))(");
+    expect(code).not.toMatch(/\bint32_t esi;/);
   });
 });
 

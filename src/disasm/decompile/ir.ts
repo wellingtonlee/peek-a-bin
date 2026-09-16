@@ -71,6 +71,33 @@ export interface IRCall {
   args: IRExpr[];
   display?: string;
   /**
+   * The value being called through, as an expression, for an indirect call
+   * whose target is a MEMORY operand — `call dword ptr [ebp + 8]` carries
+   * `deref(ebp + 8)` here. Absent for every other call: a direct one has a
+   * name, and a register target (`call esi`) keeps the text spelling in
+   * `target`, which `emit.ts`'s `calleeText` already resolves to the declared
+   * register variable.
+   *
+   * WHY AN EXPRESSION AND NOT MORE TEXT. `target` is a string, so the operand
+   * it holds is outside the IR entirely: nothing renames it, nothing promotes
+   * it, and — the part that bites — nothing counts it as a READ. The emitter
+   * therefore could not spell it (`calleeText` reported the whole operand as
+   * `__unrecovered_N`) even where the value is plainly the function's own first
+   * parameter. As an `IRExpr` it is an ordinary read: SSA versions it,
+   * `promoteVars` rewrites `deref(ebp + 8)` to `arg_0` exactly as it would
+   * anywhere else, `synthesizeStructs` rewrites it like any other deref, and
+   * the emitter prints it.
+   *
+   * THE HAZARD IS THE WALKERS, and it is the `rax = (int64_t)GetLastError()`
+   * class one level down: a pass that visits `args` and not this field sees a
+   * call that reads nothing through its target, so DCE deletes the definition
+   * the target reads and the emitted C names a value nothing assigns. Every
+   * mapping site goes through `mapCallOperands` below; every *reading* site is
+   * pinned by `__tests__/callTargetWalkers.test.ts`, which fails on a function
+   * that reads `.args` on a call without reading `.targetExpr`.
+   */
+  targetExpr?: IRExpr;
+  /**
    * Canonical registers the *callee* is known to modify, from the interprocedural
    * written-register summary in `disasm/callSummary.ts`. Undefined means no
    * summary was supplied, which is every path that does not build one.
@@ -614,6 +641,26 @@ export function regAtSize(canon: string, size: number): string {
 
 // ── Expression / Statement Walkers ──
 
+/**
+ * A call with `f` applied to every operand it carries — its arguments AND its
+ * `targetExpr`.
+ *
+ * THE ONE DECLARATION of that mapping. Fourteen passes rebuild a call with
+ * `{ ...call, args: call.args.map(f) }`, and each of those copies would have
+ * had to grow the target arm independently; a missed one drops the target's
+ * renaming, promotion or struct rewrite silently, because the field is optional
+ * and `{ ...call }` carries the *unmapped* expression straight through. The
+ * transform is the same at every site, so it is written once.
+ *
+ * `targetExpr` is left absent rather than set to `undefined` when the call has
+ * none, so a mapped call is shape-identical to an unmapped one.
+ */
+export function mapCallOperands(call: IRCall, f: (e: IRExpr) => IRExpr): IRCall {
+  const out: IRCall = { ...call, args: call.args.map(f) };
+  if (call.targetExpr) out.targetExpr = f(call.targetExpr);
+  return out;
+}
+
 /** Recursively visit all sub-expressions in an expression tree. */
 export function walkExpr(expr: IRExpr, fn: (e: IRExpr) => void): void {
   fn(expr);
@@ -630,6 +677,8 @@ export function walkExpr(expr: IRExpr, fn: (e: IRExpr) => void): void {
       break;
     case "call":
       expr.args.forEach((a) => walkExpr(a, fn));
+      // The value an indirect call transfers through is a read like any other.
+      if (expr.targetExpr) walkExpr(expr.targetExpr, fn);
       break;
     case "cast":
       walkExpr(expr.operand, fn);
