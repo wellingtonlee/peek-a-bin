@@ -283,11 +283,12 @@ describe("CallSummaryCache — the CRT idiom map rides with the summaries", () =
     { address: CALLER, size: 9 },
     { address: CHECK, size: 15 },
   ];
+  const strings = new Map<number, string>();
 
   it("builds the idiom map on x86, where no written-register closure is built", () => {
     // The `/GS` check is an x86 routine too, and it defined EAX exactly as the
     // x64 one defined RAX — so a PE32 image builds this half and not the other.
-    const facts = new CallSummaryCache().forToken(1, extents, section(), new Map(), false);
+    const facts = new CallSummaryCache().forToken(1, extents, section(), new Map(), false, strings);
     expect(facts.byAddress.size).toBe(0);
     expect(facts.idioms?.get(CHECK)?.name).toBe("__security_check_cookie");
     const check = facts.idioms?.get(CHECK);
@@ -298,7 +299,7 @@ describe("CallSummaryCache — the CRT idiom map rides with the summaries", () =
   });
 
   it("builds both halves on x64", () => {
-    const facts = new CallSummaryCache().forToken(1, extents, section(), new Map(), true);
+    const facts = new CallSummaryCache().forToken(1, extents, section(), new Map(), true, strings);
     expect(facts.byAddress.size).toBe(2);
     // The body compares ECX, not RCX, so at 64-bit width it is not the routine.
     expect(facts.idioms?.size).toBe(0);
@@ -308,17 +309,32 @@ describe("CallSummaryCache — the CRT idiom map rides with the summaries", () =
     // A token is never reused across images in the app, but the same token
     // asked at both widths must not be served the other's answer.
     const cache = new CallSummaryCache();
-    const x86 = cache.forToken(1, extents, section(), new Map(), false);
-    const x64 = cache.forToken(1, extents, section(), new Map(), true);
+    const x86 = cache.forToken(1, extents, section(), new Map(), false, strings);
+    const x64 = cache.forToken(1, extents, section(), new Map(), true, strings);
     expect(x64).not.toBe(x86);
     expect(x64.byAddress.size).toBe(2);
-    expect(cache.peek(1, true)).toBe(x64);
-    expect(cache.peek(1, false)).toBeUndefined();
+    expect(cache.peek(1, true, strings)).toBe(x64);
+    expect(cache.peek(1, false, strings)).toBeUndefined();
   });
 
-  it("serves the held entry for the same token and width", () => {
+  it("serves the held entry for the same token, width and string map", () => {
     const cache = new CallSummaryCache();
-    const first = cache.forToken(1, extents, section(), new Map(), false);
-    expect(cache.forToken(1, [], [], new Map(), false)).toBe(first);
+    const first = cache.forToken(1, extents, section(), new Map(), false, strings);
+    expect(cache.forToken(1, [], [], new Map(), false, strings)).toBe(first);
+  });
+
+  it("misses when the string map is another object, since the pfn half read it", () => {
+    // `configure` is sent twice per file, each replacing the worker's string
+    // map. A `pfn` half built against the first map — the parser's strings —
+    // would refuse every lookup whose string only the second holds, and hold
+    // that refusal for the session. Identity, not content: a content key costs
+    // the pass it saves.
+    const cache = new CallSummaryCache();
+    const first = cache.forToken(1, extents, section(), new Map(), false, strings);
+    expect(cache.peek(1, false, strings)).toBe(first);
+    expect(cache.peek(1, false, new Map(strings))).toBeUndefined();
+    const second = cache.forToken(1, extents, section(), new Map(), false, new Map(strings));
+    expect(second).not.toBe(first);
+    expect(second.pfn?.lookups).toBe(0);
   });
 });

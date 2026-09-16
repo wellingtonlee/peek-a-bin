@@ -802,6 +802,26 @@ for (const b of bins) {
     row("  in a data section", (x) => x.globals.inData);
     row("  string derefs", (x) => x.globals.stringDerefs);
     row("  data addresses not deref'd", (x) => x.globals.addressLiterals);
+    // The GetProcAddress pre-pass (pfnGlobals.ts, peek-a-bin-5b6q.5). Report-only:
+    // `recognised` is what the pass named, `pfn_ declared` what reached the page,
+    // `refused` the pass declining. Read `pfn_ OUTSIDE a data section` as a
+    // defect if it leaves 0 — a claim the pass cannot check itself.
+    if (B.pfnPrepass && C.pfnPrepass) {
+      row("pfn_ globals recognised", (x) => x.pfnPrepass.recognised);
+      row("  EncodePointer-wrapped", (x) => x.pfnPrepass.encoded);
+      row("  GetProcAddress lookups", (x) => x.pfnPrepass.lookups);
+      row("  refused", (x) => x.pfnPrepass.refused);
+      row("  pfn_ declared on the page", (x) => x.globals.pfnDeclared);
+      row("  pfn_ mentions", (x) => x.globals.pfnSites);
+      row("  DecodePointer(pfn_) reads", (x) => x.globals.pfnDecodeReads);
+      row("  pfn_ OUTSIDE a data section", (x) => x.globals.pfnUnplaced);
+      row("indirect casts ((intptr_t (*)())", (x) => x.globals.indirectCasts);
+      row("  of those, reading a pfn_ name", (x) => x.globals.pfnCallSites);
+    } else {
+      note(
+        "  pfn_ globals                  NOT MEASURED on both sides (a run predating the pre-pass)",
+      );
+    }
   } else {
     note("  named globals                 NOT MEASURED on both sides (a run predating the audit)");
   }

@@ -705,7 +705,7 @@ export async function dispatch(
         // and `configure` clears it, so the client cannot model when a miss
         // happens and must be told.
         calleeClobbers =
-          state.callSummaries.peek(token, args.is64 as boolean) ??
+          state.callSummaries.peek(token, args.is64 as boolean, state.stringMap) ??
           (whole
             ? state.callSummaries.forToken(
                 token,
@@ -713,6 +713,7 @@ export async function dispatch(
                 whole,
                 state.iatMap,
                 args.is64 as boolean,
+                state.stringMap,
               )
             : undefined);
         if (!calleeClobbers) return { needInstructions: true };
@@ -735,11 +736,14 @@ export async function dispatch(
         undefined,
         // What the emitter names a dereferenced constant from — see
         // `decompile/naming.ts`. The IAT is the one `configure` sent; the
-        // section table is the handshake's.
+        // section table is the handshake's; the `pfn_` globals are the
+        // whole-image pre-pass's, which arrived with the summary above (and are
+        // absent exactly when it is — an older client gets `g_` for them).
         {
           dataRanges: state.dataRanges,
           iatMap: state.iatMap,
           securityCookie: state.securityCookie,
+          pfn: calleeClobbers?.pfn?.globals,
         },
         // Read by the client off the PE, since the worker has no `.rdata`.
         args.seh32Scopes as Seh32ScopeTable | null | undefined,

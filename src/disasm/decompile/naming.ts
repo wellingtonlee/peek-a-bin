@@ -25,6 +25,7 @@
  * "a data xref" in the listing are one predicate.
  */
 import type { DataSectionRange } from "../../pe/sections";
+import type { PfnGlobal } from "../pfnGlobals";
 
 /** A data section as a VA range, with what the `extern` comment prints. */
 export type DataRange = DataSectionRange;
@@ -49,11 +50,15 @@ export interface NamingContext {
    */
   securityCookie?: number;
   /**
-   * Address → name for a function pointer stored at that address. Declared here
-   * so epic 2's B3 (`pfn_` naming) appends nothing to `decompileFunction`; NOT
-   * read in this stage.
+   * Global address → the `GetProcAddress` result the image stores there, from
+   * `disasm/pfnGlobals.ts`'s whole-image pre-pass: `pfn_<proc>`, and whether
+   * the value went through `EncodePointer`. A DIFFERENT grounding from the
+   * section table's — the store instruction itself, reconciled against every
+   * other writer of the address — so `globalAt` asks it ahead of the `g_`
+   * rule and does not require the address to be in a data section (the census
+   * checks that it is). Absent means no pre-pass ran: every such slot is `g_`.
    */
-  pfn?: ReadonlyMap<number, string>;
+  pfn?: ReadonlyMap<number, PfnGlobal>;
 }
 
 /** The data section containing `va`, or `undefined` — `[va, va + size)`. */

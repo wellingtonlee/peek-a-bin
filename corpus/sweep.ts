@@ -465,6 +465,25 @@ export interface BinResult {
     detail: string[];
   };
   /**
+   * THE `GetProcAddress` PRE-PASS (`disasm/pfnGlobals.ts`, peek-a-bin-5b6q.5),
+   * read from `af.calleeClobbers.pfn` for the reason `gsCheck` reads the idiom
+   * map: the measurement is of what the MCP decompile path consumed. `lookups`
+   * is every `call GetProcAddress` seen — the liveness denominator — and
+   * `recognised + refused === lookups` where no two shapes share a slot (a
+   * shared slot is one recognised entry or several refusals). Report-only: a
+   * refusal is the pre-pass declining to name, never a wrong name, and the
+   * `corpus/globals.ts` text half beside it counts what reached the page.
+   */
+  pfnPrepass: {
+    lookups: number;
+    recognised: number;
+    encoded: number;
+    refused: number;
+    byReason: Record<string, number>;
+    globals: { va: number; name: string; encoded: boolean }[];
+    refusals: { reason: string; at: number; global?: number; proc?: string }[];
+  };
+  /**
    * STATEMENT DROPS ACROSS `structureCFG`, BY OBJECT IDENTITY.
    *
    * The complement of line map coverage, and a strictly sharper question. That
@@ -904,6 +923,7 @@ export async function sweepBinary(key: BinKey): Promise<BinResult> {
     },
     callees: { pairs: 0, lost: 0, funcsAffected: 0, detail: [] },
     gsCheck: gsCheckBaseline(af),
+    pfnPrepass: pfnPrepassSummary(af),
     stmtDrops: { tracked: 0, dropped: 0, byKind: {}, funcsAffected: 0, detail: [] },
     drops: [],
     unrecovered: {
@@ -1491,6 +1511,29 @@ function gsCheckBaseline(af: Af): BinResult["gsCheck"] {
     agree:
       cookieBody !== null && cookieLoadConfig !== null ? cookieBody === cookieLoadConfig : null,
     detail: [],
+  };
+}
+
+/**
+ * `BinResult.pfnPrepass`, from the session's own pre-pass — never recomputed
+ * here, so a harness figure is a figure about the code the browser and the MCP
+ * server run.
+ */
+function pfnPrepassSummary(af: Af): BinResult["pfnPrepass"] {
+  const pre = af.calleeClobbers.pfn;
+  const byReason: Record<string, number> = {};
+  for (const r of pre?.refusals ?? []) byReason[r.reason] = (byReason[r.reason] ?? 0) + 1;
+  const globals = [...(pre?.globals ?? new Map()).entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([va, g]) => ({ va, name: g.name, encoded: g.encoded }));
+  return {
+    lookups: pre?.lookups ?? 0,
+    recognised: globals.length,
+    encoded: globals.filter((g) => g.encoded).length,
+    refused: pre?.refusals.length ?? 0,
+    byReason,
+    globals,
+    refusals: (pre?.refusals ?? []).map((r) => ({ ...r })),
   };
 }
 

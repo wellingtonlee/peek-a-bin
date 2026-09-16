@@ -30,6 +30,20 @@
  *     value coincidence is exactly the provenance the naming rule refuses.
  *   - **stringDerefs** — `*(T*)("…")`, a deref of a string's address, which keeps
  *     the older literal substitution.
+ *   - **pfnDeclared / pfnDistinct / pfnEncoded / pfnSites** — the `pfn_<proc>`
+ *     slots (peek-a-bin-5b6q.5): `extern intptr_t pfn_X;` declarations, whose
+ *     trailing comment reads `GetProcAddress("X") stored at 0x…` and, where the
+ *     value went through `EncodePointer`, `EncodePointer-wrapped`; distinct
+ *     addresses (read from that comment), how many are encoded, and body
+ *     mentions. **pfnUnplaced** is a `pfn_` whose address is in no data section
+ *     — the pre-pass does not consult the section table, so this is the census
+ *     asking the question for it; expect 0. **indirectCasts** is every
+ *     `((intptr_t (*)())…)` on the page and **pfnCallSites** those whose value
+ *     is a `pfn_` name directly — the call site is NOT rewritten, so this rises
+ *     only where copy propagation carried the name into the call; a read through
+ *     `DecodePointer(pfn_X)` is **pfnDecodeReads**. `BinResult.pfnPrepass`
+ *     carries the pre-pass's own recognised/refused-by-reason counts beside
+ *     these, so "found by the pass" and "reached the page" are two numbers.
  *
  * **REPORT-ONLY, and the reason is the residue's character.** A raw deref is an
  * incompleteness, not a falsehood — `*(int32_t*)(0x414620)` is what the machine
@@ -93,6 +107,18 @@ export interface GlobalsResult {
   impSites: number;
   addressLiterals: number;
   stringDerefs: number;
+  /** `pfn_` declarations (one per function per address), distinct addresses, encoded ones, body mentions. */
+  pfnDeclared: number;
+  pfnDistinct: number;
+  pfnEncoded: number;
+  pfnSites: number;
+  /** `pfn_` declarations whose address is in no data section. Expect 0 — see the header. */
+  pfnUnplaced: number;
+  /** Every `((intptr_t (*)())…)` cast on the page, and those whose value is a `pfn_` name. */
+  indirectCasts: number;
+  pfnCallSites: number;
+  /** `DecodePointer(pfn_X)` reads. */
+  pfnDecodeReads: number;
   /** Functions with at least one `g_` or `__imp_` declaration. */
   funcsNaming: number;
   /** Functions read — the liveness denominator. */
@@ -100,6 +126,15 @@ export interface GlobalsResult {
   rows: RawDerefRec[];
   /** Every `g_` declared outside a data section, for adjudication. Expect none. */
   unplacedNamed: { fn: string; addr: number; name: string; va: number }[];
+  /** Every `pfn_` declared, with its address and whether the table places it in a data section. */
+  pfnRows: {
+    fn: string;
+    addr: number;
+    name: string;
+    va: number;
+    encoded: boolean;
+    section: string | null;
+  }[];
 }
 
 /** `*(int32_t*)(0x414620)` — the raw spelling, with the address captured. */
@@ -110,6 +145,17 @@ const STRING_DEREF = /\*\(u?int\d+_t\*\)\("/g;
 const G_DECL = /^extern \S+ \*?(g_([0-9A-Fa-f]+))(\[\])?;/;
 /** `extern void *__imp_X;` */
 const IMP_DECL = /^extern void \*__imp_[A-Za-z_]\w*;/;
+/**
+ * The `pfn_` declaration line, read UNMASKED because the address is in its
+ * comment: `extern intptr_t pfn_X;` followed by a comment reading
+ * `GetProcAddress("X") stored at 0x…` and, when encoded, `EncodePointer-wrapped`.
+ */
+const PFN_DECL =
+  /^extern intptr_t (pfn_[A-Za-z0-9_]+); \/\* GetProcAddress\("[^"]*"\) stored at 0x([0-9A-Fa-f]+)(, EncodePointer-wrapped)? \*\//;
+const PFN_MENTION = /\bpfn_[A-Za-z0-9_]+\b/g;
+const INDIRECT_CAST = /\(\(intptr_t \(\*\)\(\)\)/g;
+const PFN_CALL_SITE = /\(\(intptr_t \(\*\)\(\)\)pfn_[A-Za-z0-9_]+\)/g;
+const PFN_DECODE_READ = /\bDecodePointer\(pfn_[A-Za-z0-9_]+\)/g;
 const G_MENTION = /\bg_[0-9A-Fa-f]+\b/g;
 const IMP_MENTION = /\b__imp_[A-Za-z_]\w*/g;
 const HEX_LITERAL = /\b0x([0-9A-Fa-f]+)\b/g;
@@ -168,10 +214,19 @@ export const emptyGlobals = (): GlobalsResult => ({
   impSites: 0,
   addressLiterals: 0,
   stringDerefs: 0,
+  pfnDeclared: 0,
+  pfnDistinct: 0,
+  pfnEncoded: 0,
+  pfnSites: 0,
+  pfnUnplaced: 0,
+  indirectCasts: 0,
+  pfnCallSites: 0,
+  pfnDecodeReads: 0,
   funcsNaming: 0,
   funcs: 0,
   rows: [],
   unplacedNamed: [],
+  pfnRows: [],
 });
 
 export function auditGlobals(
@@ -180,6 +235,7 @@ export function auditGlobals(
 ): GlobalsResult {
   const out = emptyGlobals();
   const distinctNamed = new Set<number>();
+  const distinctPfn = new Set<number>();
   for (const { funcs } of sets) {
     for (const f of funcs) {
       const code = f.code ?? "";
@@ -189,10 +245,32 @@ export function auditGlobals(
       out.stringDerefs += [...code.matchAll(STRING_DEREF)].length;
       const masked = maskCommentsAndStrings(code);
       const lines = masked.split("\n");
+      // Masking preserves newlines, so the two arrays line up.
+      const unmasked = code.split("\n");
       let raw = 0;
       let naming = false;
       for (let i = 0; i < lines.length; i++) {
         const l = lines[i];
+        const pfnDecl = PFN_DECL.exec(unmasked[i]);
+        if (pfnDecl) {
+          naming = true;
+          out.pfnDeclared++;
+          const va = Number.parseInt(pfnDecl[2], 16);
+          distinctPfn.add(va);
+          const encoded = pfnDecl[3] !== undefined;
+          if (encoded) out.pfnEncoded++;
+          const sec = sectionAt(sections, va);
+          if (!sec?.data) out.pfnUnplaced++;
+          out.pfnRows.push({
+            fn: f.name,
+            addr: f.addr,
+            name: pfnDecl[1],
+            va,
+            encoded,
+            section: sec?.name ?? null,
+          });
+          continue;
+        }
         const decl = G_DECL.exec(l);
         if (decl) {
           naming = true;
@@ -215,6 +293,10 @@ export function auditGlobals(
         // Body lines from here: mentions, raw derefs, and the literal residue.
         G_MENTION.lastIndex = 0;
         out.namedSites += [...l.matchAll(G_MENTION)].length;
+        out.pfnSites += [...l.matchAll(PFN_MENTION)].length;
+        out.indirectCasts += [...l.matchAll(INDIRECT_CAST)].length;
+        out.pfnCallSites += [...l.matchAll(PFN_CALL_SITE)].length;
+        out.pfnDecodeReads += [...l.matchAll(PFN_DECODE_READ)].length;
         IMP_MENTION.lastIndex = 0;
         out.impSites += [...l.matchAll(IMP_MENTION)].length;
         RAW_DEREF.lastIndex = 0;
@@ -249,5 +331,6 @@ export function auditGlobals(
     }
   }
   out.namedDistinct = distinctNamed.size;
+  out.pfnDistinct = distinctPfn.size;
   return out;
 }

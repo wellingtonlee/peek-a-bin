@@ -2248,3 +2248,109 @@ describe("dispatch — decompileFunction carries the CRT idiom map through the s
     expect(returnLine(r.code)).toBe("return __security_check_cookie();");
   });
 });
+
+/**
+ * The third fact the summary pass carries: which globals hold a
+ * `GetProcAddress` result (`pfnGlobals.ts`), so the emitter spells the slot
+ * `pfn_<proc>` (peek-a-bin-5b6q.5). Same token, same `needInstructions`
+ * protocol, nothing new on the wire — and the string map is part of the cache
+ * key by identity, because the pre-pass reads it and `configure` replaces it
+ * twice per file.
+ */
+describe("dispatch — decompileFunction carries the pfn_ globals through the same summary", () => {
+  const WRITER = 0x40101e;
+  const GPA = 0x40d04c;
+  const STR = 0x40ea68;
+  /** w32!sub_401000's lookup: push str / push esi / call [GPA] / mov [G], eax / ret. */
+  const instructions = (): Instruction[] => [
+    insn(WRITER, "push", "0x40ea68", 5),
+    insn(WRITER + 5, "push", "esi", 1),
+    insn(WRITER + 6, "call", "dword ptr [0x40d04c]", 6),
+    insn(WRITER + 12, "mov", "dword ptr [0x4125f8], eax", 5),
+    insn(WRITER + 17, "ret", "", 1),
+  ];
+  const writer = { name: "sub_40101E", address: WRITER, size: 18 };
+  const request = (extra: Record<string, unknown>) => ({
+    func: writer,
+    funcInsns: instructions(),
+    stackFrame: null,
+    signature: null,
+    is64: false,
+    funcEntries: [[writer.address, { name: writer.name, address: writer.address }]],
+    funcExtents: [[writer.address, writer.size]] as [number, number][],
+    insnsToken: 11,
+    ...extra,
+  });
+  const configured = async () => {
+    const s = state();
+    await dispatch(
+      "configure",
+      {
+        stringEntries: [[STR, "MessageBoxTimeoutA"]],
+        iatEntries: [[GPA, { lib: "KERNEL32.dll", func: "GetProcAddress" }]],
+        machine: 0x14c,
+        dataRanges: [{ va: 0x412000, size: 0x1000, name: ".data", writable: true }],
+      },
+      s,
+    );
+    return s;
+  };
+
+  it("asks for the section first, then names the slot from the resent array", async () => {
+    const s = await configured();
+    expect(await dispatch("decompileFunction", request({}), s)).toEqual({
+      needInstructions: true,
+    });
+    const r = (await dispatch(
+      "decompileFunction",
+      request({ instructions: instructions() }),
+      s,
+    )) as { code: string };
+    expect(r.code).toContain(
+      'extern intptr_t pfn_MessageBoxTimeoutA; /* GetProcAddress("MessageBoxTimeoutA") stored at 0x4125F8 */',
+    );
+    expect(r.code).toContain("pfn_MessageBoxTimeoutA = ");
+    expect(r.code).not.toContain("g_4125F8");
+    // Held: the next request under the same token needs no resend.
+    const again = (await dispatch("decompileFunction", request({}), s)) as { code: string };
+    expect(again.code).toBe(r.code);
+  });
+
+  it("a `configure` that re-sends the strings invalidates the held entry — the pre-pass read them", async () => {
+    const s = await configured();
+    await dispatch("decompileFunction", request({ instructions: instructions() }), s);
+    // The strings-only `configure` (no machine): the same strings, a new Map.
+    await dispatch(
+      "configure",
+      {
+        stringEntries: [[STR, "MessageBoxTimeoutA"]],
+        iatEntries: [[GPA, { lib: "KERNEL32.dll", func: "GetProcAddress" }]],
+      },
+      s,
+    );
+    expect(await dispatch("decompileFunction", request({}), s)).toEqual({
+      needInstructions: true,
+    });
+  });
+
+  it("without the string in the map the slot stays `g_` — the pre-pass refused, and said nothing new on the wire", async () => {
+    const s = state();
+    await dispatch(
+      "configure",
+      {
+        stringEntries: [],
+        iatEntries: [[GPA, { lib: "KERNEL32.dll", func: "GetProcAddress" }]],
+        machine: 0x14c,
+        dataRanges: [{ va: 0x412000, size: 0x1000, name: ".data", writable: true }],
+      },
+      s,
+    );
+    const r = (await dispatch(
+      "decompileFunction",
+      request({ instructions: instructions() }),
+      s,
+    )) as { code: string };
+    expect(r.code).not.toContain("pfn_");
+    expect(r.code).toContain("g_4125F8 = ");
+  });
+});

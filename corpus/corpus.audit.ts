@@ -284,6 +284,8 @@ if (!pre.haveBins || !pre.haveCc) {
           const gl = glResults.get(key) as GlobalsResult;
           const rows = [
             ...gl.unplacedNamed.map((x) => ({ kind: "namedUnplaced", ...x })),
+            ...gl.pfnRows.map((x) => ({ kind: "pfn", ...x })),
+            ...r.pfnPrepass.refusals.map((x) => ({ kind: "pfnRefused", ...x })),
             ...gl.rows,
           ];
           writeFileSync(
@@ -409,7 +411,12 @@ if (!pre.haveBins || !pre.haveCc) {
               // report-only in every column (peek-a-bin-5b6q.4).
               globals: (() => {
                 const gl = glResults.get(key) as GlobalsResult;
-                return { ...gl, rows: gl.rows.length, unplacedNamed: gl.unplacedNamed.length };
+                return {
+                  ...gl,
+                  rows: gl.rows.length,
+                  unplacedNamed: gl.unplacedNamed.length,
+                  pfnRows: gl.pfnRows.length,
+                };
               })(),
               // ── The readability instruments of peek-a-bin-n9cl.1. ALL
               // report-only in this session; each has a liveness half asserted
@@ -1299,6 +1306,32 @@ if (!pre.haveBins || !pre.haveCc) {
     });
 
     /**
+     * NOT A GATE either — a refusal is the pre-pass declining to name. Three
+     * things are asserted: the pass SAW lookups on every binary (each MSVC CRT
+     * here resolves `CorExitProcess` at least), every lookup is accounted for
+     * as recognised or refused (a shared slot collapses to one entry or several
+     * refusals, so `>=`), and on the binaries that carry the stored shape —
+     * t64, w64, w32 at b613025; t32's one lookup is called and never kept — the
+     * text half saw a `pfn_` reach the page. A `pfn_` outside a data section is
+     * a false claim and is reported for `compare.mjs`, not gated, like
+     * `namedUnplaced` (peek-a-bin-5b6q.5).
+     */
+    it("accounts for every GetProcAddress lookup and sees pfn_ reach the page where the shape exists", () => {
+      for (const [key, r] of results) {
+        const p = r.pfnPrepass;
+        expect(`${key}: lookups=${p.lookups > 0}`).toBe(`${key}: lookups=true`);
+        expect(`${key}: accounted=${p.recognised + p.refused >= p.lookups}`).toBe(
+          `${key}: accounted=true`,
+        );
+        const gl = glResults.get(key) as GlobalsResult;
+        expect(`${key}: onPage=${gl.pfnDistinct === p.recognised}`).toBe(`${key}: onPage=true`);
+        if (p.recognised > 0) {
+          expect(`${key}: declared=${gl.pfnDeclared > 0}`).toBe(`${key}: declared=true`);
+        }
+      }
+    });
+
+    /**
      * Not a gate, for the reason in `emptyCaseBodies`' docstring: one row can be
      * legitimate, and the count is 0 over a corpus where the legitimate
      * population is empty too — so a gate would rest on nothing. What is
@@ -2135,6 +2168,31 @@ function renderReport(): string {
       );
       L.push("    leaves literal on purpose — the deref is the provenance. Sites in");
       L.push("    globals_<bin>.jsonl. See globals.ts (peek-a-bin-5b6q.4).");
+      {
+        const p = r.pfnPrepass;
+        const reasons = Object.entries(p.byReason)
+          .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+          .map(([k, v]) => `${v} ${k}`)
+          .join(", ");
+        L.push(
+          `  pfn_ globals                ${p.recognised} recognised (${p.encoded} EncodePointer-wrapped) of ` +
+            `${p.lookups} GetProcAddress lookups, ${p.refused} refused${reasons ? ` (${reasons})` : ""}`,
+        );
+        L.push(
+          `    on the page               ${gl.pfnDeclared} pfn_ declared (${gl.pfnDistinct} distinct, ` +
+            `${gl.pfnSites} mentions, ${gl.pfnDecodeReads} DecodePointer reads); ` +
+            `${gl.pfnCallSites} of ${gl.indirectCasts} indirect casts read a pfn_ name; ` +
+            `${gl.pfnUnplaced} pfn_ outside a data section`,
+        );
+        L.push("    A global every absolute store in the image fills from ONE GetProcAddress(…,");
+        L.push('    "X") — through EncodePointer or not — is `pfn_X` (extern intptr_t, the string');
+        L.push("    and the slot's address in the comment). The name is the VARIABLE's: the call");
+        L.push("    through it keeps the indirect cast and no prototype is claimed. REPORT-ONLY;");
+        L.push("    a refusal is the pass declining to name. `pfn_ outside a data section` is a");
+        L.push("    false claim the pass cannot see itself: expect 0. Recognised slots and every");
+        L.push("    refusal (with its reason) in globals_<bin>.jsonl. See pfnGlobals.ts");
+        L.push("    (peek-a-bin-5b6q.5).");
+      }
     }
     // ── The readability instruments of peek-a-bin-n9cl.1. Report-only, except
     // the undeclared-identifier row, which peek-a-bin-n9cl.4 turned into a gate. ──

@@ -2,12 +2,13 @@ import { describe, expect, it } from "vitest";
 import type { RuntimeFunction, ScopeTableEntry } from "../../../pe/types";
 import type { CalleeClobbers } from "../../callSummary";
 import { recogniseCrtIdioms } from "../../crtIdioms";
+import { recognisePfnGlobals } from "../../pfnGlobals";
 import type { Seh32ScopeTable } from "../../seh32";
 import type { FunctionSignature } from "../../signatures";
 import { analyzeStackFrame } from "../../stack";
 import type { DisasmFunction, Instruction, Xref } from "../../types";
 import { isKnownRegister } from "../ir";
-import type { NamingContext } from "../naming";
+import type { DataRange, NamingContext } from "../naming";
 import { decompileFunction, type StructuringTap } from "../pipeline";
 import { StructRegistry } from "../structs";
 
@@ -9880,5 +9881,149 @@ describe("decompileFunction — EH4 trylevel stores are annotated from the funct
       table,
     );
     expect(code).not.toContain("EH4");
+  });
+});
+
+/**
+ * END TO END for peek-a-bin-5b6q.5: the whole-image pre-pass
+ * (`pfnGlobals.ts`) names a `GetProcAddress` result's slot, `NamingContext.pfn`
+ * carries the name, and `globalAt` spells the slot `pfn_<proc>` with an
+ * `extern` above the header — while the call THROUGH the slot keeps the
+ * indirect spelling. The fixture is `t64!sub_14000D3C8`'s shape reduced to
+ * one lookup and one reader, byte-exact RIP displacements.
+ */
+describe("pfn_ globals — a stored GetProcAddress result reaches the page by name", () => {
+  const GPA = 0x1400101d0;
+  const ENC = 0x140010130;
+  const DEC = 0x140010138;
+  const STR = 0x140011ca0;
+  const G = 0x1400163d0;
+  const iat = new Map([
+    [GPA, { lib: "KERNEL32.dll", func: "GetProcAddress" }],
+    [ENC, { lib: "KERNEL32.dll", func: "EncodePointer" }],
+    [DEC, { lib: "KERNEL32.dll", func: "DecodePointer" }],
+  ]);
+  const strings = new Map([[STR, "MessageBoxW"]]);
+  const data: DataRange[] = [{ va: 0x140016000, size: 0x1000, name: ".data", writable: true }];
+
+  /** lea rdx, str / mov rcx, rbx / call GPA / mov rcx, rax / call ENC / mov [G], rax / mov rcx, [G] / call DEC / call rax / ret */
+  const writerAndReader = (): Instruction[] => [
+    ins(0x14000d41f, "lea", "rdx, [rip + 0x487a]", 7),
+    ins(0x14000d426, "mov", "rcx, rbx", 3),
+    ins(0x14000d429, "call", "qword ptr [rip + 0x2da1]", 6),
+    ins(0x14000d42f, "mov", "rcx, rax", 3),
+    ins(0x14000d432, "call", "qword ptr [rip + 0x2cf8]", 6), // → ENC
+    ins(0x14000d438, "mov", "qword ptr [rip + 0x8f91], rax", 7), // → G
+    ins(0x14000d43f, "mov", "rcx, qword ptr [rip + 0x8f8a]", 7), // → G
+    ins(0x14000d446, "call", "qword ptr [rip + 0x2cec]", 6), // → DEC
+    ins(0x14000d44c, "call", "rax", 2),
+    ins(0x14000d44e, "ret", "", 1),
+  ];
+
+  function decompileWith(instructions: Instruction[], pfn: NamingContext["pfn"]): string {
+    const start = instructions[0].address;
+    const last = instructions[instructions.length - 1];
+    const func: DisasmFunction = {
+      name: "sub_14000D41F",
+      address: start,
+      size: last.address + last.size - start,
+    };
+    return decompileFunction(
+      func,
+      instructions,
+      new Map<number, Xref[]>(),
+      null,
+      null,
+      true,
+      new Map(),
+      iat,
+      strings,
+      new Map(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { dataRanges: data, iatMap: iat, pfn },
+    ).code;
+  }
+
+  /** The pre-pass over the same instructions the function is decompiled from. */
+  function prepass(instructions: Instruction[]) {
+    return recognisePfnGlobals({
+      instructions,
+      funcExtents: [{ address: instructions[0].address, size: 0x100 }],
+      iatMap: iat,
+      stringMap: strings,
+      is64: true,
+    }).globals;
+  }
+
+  it("declares the slot `extern intptr_t pfn_MessageBoxW` with its ground, stores into it by name, and reads it by name", () => {
+    const code = decompileWith(writerAndReader(), prepass(writerAndReader()));
+    expect(code).toContain(
+      'extern intptr_t pfn_MessageBoxW; /* GetProcAddress("MessageBoxW") stored at 0x1400163D0, EncodePointer-wrapped */',
+    );
+    expect(code).toMatch(/pfn_MessageBoxW = /);
+    expect(code).toContain("DecodePointer(pfn_MessageBoxW)");
+    // The slot is NOT a `g_` anywhere on the page, and the call through it is
+    // still the indirect spelling — no claim that the call IS MessageBoxW.
+    expect(code).not.toContain("g_1400163D0");
+    expect(code).toContain("((intptr_t (*)())");
+    expect(code).not.toMatch(/\bMessageBoxW\(/);
+  });
+
+  it("CONTROL: a second store to the slot anywhere in the image refuses the name — the slot is `g_` again", () => {
+    // Another function writes G from RCX. The pre-pass sees the whole image;
+    // the emitter is handed what it decided, and `g_` is what remains.
+    const other = ins(0x14000e000, "mov", "qword ptr [rip + 0x83c9], rcx", 7); // → G
+    const image = [...writerAndReader(), other];
+    const pfn = recognisePfnGlobals({
+      instructions: image,
+      funcExtents: [
+        { address: 0x14000d41f, size: 0x30 },
+        { address: 0x14000e000, size: 7 },
+      ],
+      iatMap: iat,
+      stringMap: strings,
+      is64: true,
+    }).globals;
+    expect(pfn.size).toBe(0);
+    const code = decompileWith(writerAndReader(), pfn);
+    expect(code).not.toContain("pfn_");
+    expect(code).toContain("extern int64_t g_1400163D0; /* .data */");
+    expect(code).toContain("DecodePointer(g_1400163D0)");
+  });
+
+  it("CONTROL: no pre-pass at all (pfn absent) is exactly the B2 spelling", () => {
+    const code = decompileWith(writerAndReader(), undefined);
+    expect(code).not.toContain("pfn_");
+    expect(code).toContain("g_1400163D0");
+  });
+
+  it("falls to the `g_` byte array when the body also reads the slot at another width — no width is picked", () => {
+    const body = writerAndReader();
+    // A 4-byte read of the slot beside the 8-byte load.
+    body.splice(6, 0, ins(0x14000d43f, "mov", "edx, dword ptr [rip + 0x8f8b]", 6)); // → G (0x14000d445 + 0x8f8b)
+    body[7] = ins(0x14000d445, "mov", "rcx, qword ptr [rip + 0x8f84]", 7); // → G
+    body[8] = ins(0x14000d44c, "call", "qword ptr [rip + 0x2ce6]", 6); // → DEC
+    body[9] = ins(0x14000d452, "call", "rax", 2);
+    body[10] = ins(0x14000d454, "ret", "", 1);
+    const code = decompileWith(body, prepass(body));
+    expect(code).not.toContain("pfn_");
+    expect(code).toContain("extern uint8_t g_1400163D0[]; /* .data; accessed at 4 and 8 bytes */");
+  });
+
+  it("does not name a slot that only a narrower read touches: the name is a pointer's", () => {
+    // Hand the emitter a pfn entry whose only mention in this body is 4 bytes
+    // wide — and live, or the load is deleted before the emitter sees it.
+    const body = [
+      ins(0x14000d43f, "mov", "eax, dword ptr [rip + 0x8f8b]", 6), // → G
+      ins(0x14000d445, "ret", "", 1),
+    ];
+    const pfn = new Map([[G, { name: "pfn_MessageBoxW", proc: "MessageBoxW", encoded: true }]]);
+    const code = decompileWith(body, pfn);
+    expect(code).not.toContain("pfn_");
+    expect(code).toContain("g_1400163D0");
   });
 });

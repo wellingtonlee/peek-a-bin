@@ -119,6 +119,8 @@ Reuse them rather than re-rolling the logic.
     signature and the call-site walk stays). Each publishes the name, `preservesResult`, and where
     it has one the cookie's address and the register signature, riding in `CalleeClobbers.idioms`
     through the same whole-image pass and `needInstructions` protocol as the clobber summaries.
+  - `pfnGlobals.ts` — the `GetProcAddress`-result pre-pass (`pfn_<Name>` globals), the third fact on
+  that channel (`CalleeClobbers.pfn`), consumed by the emitter through `NamingContext.pfn`.
 - **`disasm/arm64*.ts`** — `arm64.ts` (fixed-width sweep, `Arm64SweepCache`, jump-table reader,
   `arm64ThunkSlot`), `arm64Operands.ts` (**the single A64 branch/address grammar** — do not
   hand-roll a second), `arm64Frame.ts` (A64 frame from `.pdata`, a *second grammar* rather than a
@@ -1467,6 +1469,30 @@ refused. **Read the long-form entry before changing the code it describes.**
   survivor in NO section (the `MZ` check at the image base, a `gs:` TEB read lifted as `0x10`);
   196 polarity CHANGED rows, all the renamed-operand shape; `undeclared other` 4 → 1 on x64 (the
   three `__imp_` thunk names, now declared).
+- **A `GetProcAddress` result stored into a global names the GLOBAL `pfn_<Name>`, and nothing else.**
+  `disasm/pfnGlobals.ts` is a whole-image PRE-PASS (the writer may be decompiled later or never) that
+  rides in `CalleeClobbers.pfn` beside the CRT idiom map — same token, same `needInstructions`
+  resend, nothing new on the wire — and reaches `globalAt` as `NamingContext.pfn`, asked AHEAD of
+  `g_<HEX>` because its ground (the store, reconciled against every other absolute writer in the
+  image) is stronger than a section. Shape: `lea rdx,[rip+str]` / `push str; push h` →
+  `call GetProcAddress` (IAT, or a `jmp [slot]` thunk) → zero or more `call EncodePointer` → `mov
+  [G], rax|eax`, straight-line, with a whitelist write model. **Ten refusals, each a fixture**:
+  any other store to G anywhere in the image, two shapes disagreeing on one G, a string not in the
+  string map, a non-string name argument (an ordinal), a non-identifier string, the result
+  redefined, an intervening call, `EncodePointer` given something else, a branch target or
+  function start inside the window, and a window ending without a store. The name is the
+  VARIABLE's: `extern intptr_t pfn_MessageBoxW; /* GetProcAddress("MessageBoxW") stored at 0x…,
+  EncodePointer-wrapped */`, the call through it keeps `((intptr_t (*)())rax)(…)` — **NO call-site
+  rewrite, NO typed function-pointer cast** (a prototype turns every admitted arity under-count
+  into a gcc error), and `pfn_X` never stands in callee position, so `corpus/arity.ts`'s oracle is
+  neither blinded nor widened (0 matches, measured). A pointer-width read only; a slot the body also
+  reads narrower falls to the `g_` byte array. **The string map is part of `CallSummaryCache`'s key
+  BY IDENTITY** — `configure` replaces it twice per file. Measured at b613025: 0/5/2/7 slots
+  (t32/t64/w32/w64) of 1/6/3/8 lookups, the 4 refusals all `CorExitProcess` called through and never
+  stored; 0 of 137/38/127/34 indirect casts read a `pfn_` name directly (every call through a slot
+  goes through a register with two reaching definitions), the name appears on the load one line
+  above. `typeInfer` keying `pfn_X → API_TYPES[X]` was REFUSED as inert: the IR never carries the
+  name in callee position.
 - **One variable per register made a SPELLING device load-bearing, and the value-level repair had
   to replace it.** `peek-a-bin-pzws` spelled two live ranges of R9 as `r9` and `r9d` so that `mov
   rbp, r9 / mov r9d, r14d / … / mov [rbp+0x18], esi` — copy propagation forwards `rbp` to the entry

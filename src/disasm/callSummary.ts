@@ -42,6 +42,7 @@ import { resolveBranchTargetAddr } from "./branchTarget";
 import { type CrtIdiom, recogniseCrtIdioms } from "./crtIdioms";
 import { canonReg, isKnownRegister } from "./decompile/ir";
 import { buildFuncInsnMap, type FuncExtent } from "./funcInsns";
+import { type PfnPrepass, recognisePfnGlobals } from "./pfnGlobals";
 import type { Instruction } from "./types";
 
 // The branch-target grammar used to live here and every importer still reads
@@ -88,6 +89,17 @@ export interface CalleeClobbers {
    * Populated on BOTH widths, unlike `byAddress`: the `/GS` check is x86 too.
    */
   idioms?: ReadonlyMap<number, CrtIdiom>;
+  /**
+   * The `GetProcAddress` results the image stores into globals it writes
+   * nowhere else (`pfnGlobals.ts`), with every shape it refused. The emitter's
+   * evidence rather than the lifter's — `NamingContext.pfn` is read from it —
+   * but it is a whole-image fact computed in this same pass from the same
+   * array under the same token, and riding here is what gets it to the
+   * browser through the existing `needInstructions` protocol with nothing new
+   * crossing the worker boundary. Both widths. Optional for the same reason
+   * `idioms` is: a caller that never built one gets `g_` for every slot.
+   */
+  pfn?: PfnPrepass;
 }
 
 // ── Which registers one instruction writes ─────────────────────────────────
@@ -570,7 +582,12 @@ export function buildCallSummaries(args: BuildCallSummariesArgs): Map<number, st
  * so a hit for the wrong image cannot arise in the first place.
  */
 export class CallSummaryCache {
-  private entry?: { token: number; is64: boolean; clobbers: CalleeClobbers };
+  private entry?: {
+    token: number;
+    is64: boolean;
+    stringMap: ReadonlyMap<number, string>;
+    clobbers: CalleeClobbers;
+  };
 
   /**
    * The summaries for the instruction array `token` stands for, building them
@@ -587,6 +604,17 @@ export class CallSummaryCache {
    * wrongly defined EAX exactly as the x64 one defined RAX. The width is part of
    * the key: a token is never reused across images in the app, but the same
    * token asked at both widths must not be served the other's answer.
+   *
+   * THE STRING MAP IS PART OF THE KEY, BY IDENTITY. The `pfn` half reads it
+   * (`GetProcAddress`'s name argument is a string address), and `configure` is
+   * sent twice per file — the handshake with the parser's strings, then again
+   * once `extractStrings` has run — each replacing `state.stringMap` with a new
+   * `Map`. An entry built against the first map would refuse every lookup
+   * whose string only the second map holds, and hold that refusal for the
+   * session. Identity is exact and free where a content key would cost the
+   * pass it saves; the cost of a miss is the one resend round trip a first
+   * decompile pays anyway, and only when a decompile landed between the two
+   * `configure`s.
    */
   forToken(
     token: number,
@@ -594,9 +622,10 @@ export class CallSummaryCache {
     instructions: Instruction[],
     iatMap: Map<number, { lib: string; func: string }>,
     is64: boolean,
+    stringMap: ReadonlyMap<number, string>,
   ): CalleeClobbers {
-    const hit = this.entry;
-    if (hit && hit.token === token && hit.is64 === is64) return hit.clobbers;
+    const hit = this.peek(token, is64, stringMap);
+    if (hit) return hit;
     const funcInsnMap = buildFuncInsnMap(funcExtents, instructions);
     const clobbers: CalleeClobbers = {
       byAddress: is64
@@ -608,8 +637,9 @@ export class CallSummaryCache {
         : new Map(),
       unresolved: [],
       idioms: recogniseCrtIdioms(funcInsnMap, is64),
+      pfn: recognisePfnGlobals({ instructions, funcExtents, iatMap, stringMap, is64 }),
     };
-    this.entry = { token, is64, clobbers };
+    this.entry = { token, is64, stringMap, clobbers };
     return clobbers;
   }
 
@@ -626,11 +656,18 @@ export class CallSummaryCache {
    * Named for `SectionMemo.peek`, and for the same reason: a lookup that cannot
    * compute, so it can never evict or pay for what it did not find. Keyed on
    * the width as {@link forToken} is, or a PE32 entry would answer a 64-bit
-   * request under the same token with no written-register closure at all.
+   * request under the same token with no written-register closure at all —
+   * and on the string map's identity, for the reason given there.
    */
-  peek(token: number, is64: boolean): CalleeClobbers | undefined {
+  peek(
+    token: number,
+    is64: boolean,
+    stringMap: ReadonlyMap<number, string>,
+  ): CalleeClobbers | undefined {
     const e = this.entry;
-    return e?.token === token && e.is64 === is64 ? e.clobbers : undefined;
+    return e?.token === token && e.is64 === is64 && e.stringMap === stringMap
+      ? e.clobbers
+      : undefined;
   }
 
   /** Forget the held image, so one file's summaries do not outlive it. */

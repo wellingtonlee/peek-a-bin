@@ -1,5 +1,6 @@
 import { formatIOCTL, ioctlCodeArgIndex, isPlausibleIOCTL } from "../../analysis/driver";
 import type { NamedGlobal } from "../crtIdioms";
+import type { PfnGlobal } from "../pfnGlobals";
 import { API_TYPES } from "./apitypes";
 import type { BinaryOp, IRExpr, IRFunction, IRStmt, IRTry } from "./ir";
 import {
@@ -322,6 +323,8 @@ let _globalWidths: Map<number, Set<number>> = new Map();
 let _dataGlobalsUsed: Map<number, DataGlobalUse> = new Map();
 /** The IAT slots the body named as `__imp_X`: name → `lib!func` for the comment, or null when only the thunk spelling named it. */
 let _importSlotsUsed: Map<string, string | null> = new Map();
+/** The `pfn_` globals the body named, keyed on address, so each gets one `extern` — see `globalAt`. */
+let _pfnUsed: Map<number, PfnGlobal> = new Map();
 
 /** One data-section global the body named, with what its declaration has to say. */
 interface DataGlobalUse {
@@ -808,6 +811,15 @@ function namedGlobalAt(address: IRExpr, size: number): string | null {
  *     otherwise be misnamed as an ordinary global).
  *  3. A string's address keeps the older spelling — `*(uint8_t*)("…")` — since
  *     the literal is what the reader wants to see there.
+ *  3b. A global the whole-image pre-pass found holding a `GetProcAddress`
+ *     result (`NamingContext.pfn`, from `pfnGlobals.ts`): `pfn_<proc>`, ahead
+ *     of the `g_` rule because its grounding — the store instruction,
+ *     reconciled against every other writer in the image — is stronger than a
+ *     section. Only at the pointer width, and only when the body reads the
+ *     address at NO other width: a narrower read means the body treats the
+ *     slot as something other than one pointer, and the `g_` rule's byte
+ *     array is the truthful spelling of that. The name is the VARIABLE's;
+ *     nothing here says what a call through it reaches.
  *  4. An address in a data section: `g_<HEX>`. A global the body reads at ONE
  *     width is a scalar of that width; one read at several widths is declared
  *     `uint8_t g_X[]` and every access is spelled `*(T*)g_X` at ITS width — the
@@ -832,6 +844,14 @@ function globalAt(address: IRExpr, size: number): string | null {
     return name;
   }
   if (_stringMap?.has(va)) return null;
+  const pfn = _naming.pfn?.get(va);
+  if (pfn && size === _pointerWidth) {
+    const widths = _globalWidths.get(va);
+    if (!widths || (widths.size === 1 && widths.has(size))) {
+      _pfnUsed.set(va, pfn);
+      return pfn.name;
+    }
+  }
   const range = dataRangeAt(_naming.dataRanges, va);
   if (!range) return null;
   const name = globalName(va);
@@ -2958,6 +2978,7 @@ export function emitFunction(
   const prevGlobalWidths = _globalWidths;
   const prevDataGlobalsUsed = _dataGlobalsUsed;
   const prevImportSlotsUsed = _importSlotsUsed;
+  const prevPfnUsed = _pfnUsed;
   const prevUnrecovered = _unrecovered;
   const prevDeclaredTypes = _declaredTypes;
   const prevStructDefs = _structDefs;
@@ -2981,6 +3002,7 @@ export function emitFunction(
   collectGlobalWidths(func.body, _globalWidths);
   _dataGlobalsUsed = new Map();
   _importSlotsUsed = new Map();
+  _pfnUsed = new Map();
   _unrecovered = [];
   _declaredTypes = new Map();
   _structDefs = new Map((func.typedefs ?? []).map((d) => [d.id, d]));
@@ -3044,6 +3066,7 @@ export function emitFunction(
     _globalWidths = prevGlobalWidths;
     _dataGlobalsUsed = prevDataGlobalsUsed;
     _importSlotsUsed = prevImportSlotsUsed;
+    _pfnUsed = prevPfnUsed;
     _unrecovered = prevUnrecovered;
     _declaredTypes = prevDeclaredTypes;
     _structDefs = prevStructDefs;
@@ -3060,8 +3083,9 @@ export function emitFunction(
 
 /**
  * The `extern` block's lines, in a stable order: the CRT-named globals in
- * first-use order (one today), then IAT slots by name, then data-section
- * globals by address. Stable so the block does not move when the body does.
+ * first-use order (one today), then IAT slots by name, then `pfn_` globals by
+ * address, then data-section globals by address. Stable so the block does not
+ * move when the body does.
  */
 function externDeclarations(): string[] {
   const out: string[] = [];
@@ -3072,6 +3096,17 @@ function externDeclarations(): string[] {
     // it themselves (`calleeText`).
     out.push(
       `extern void *${name};${holds === null ? "" : ` /* IAT slot: ${commentSafe(holds)} */`}`,
+    );
+  }
+  for (const [va, pfn] of [..._pfnUsed.entries()].sort((a, b) => a[0] - b[0])) {
+    // `intptr_t`, deliberately not a function-pointer type: a prototype would
+    // be a claim about the callee's arity that `GetProcAddress` never made,
+    // and would turn every admitted arity under-count at a call through the
+    // slot into a gcc error. The comment carries the ground — the string and
+    // the slot's address, so the reader can find the store in the listing —
+    // and whether a reader must `DecodePointer` what it loads.
+    out.push(
+      `extern intptr_t ${pfn.name}; /* GetProcAddress("${commentSafe(pfn.proc)}") stored at ${formatHex(va)}${pfn.encoded ? ", EncodePointer-wrapped" : ""} */`,
     );
   }
   const byAddress = [..._dataGlobalsUsed.entries()].sort((a, b) => a[0] - b[0]);

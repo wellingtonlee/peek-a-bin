@@ -1592,6 +1592,31 @@ rose 321 → 530 with no declaration changed; it now reads 312/280/287/320 again
 321/284/291/325, the fall being struct sets the old key compiled twice for the cookie's `extern`.
 Ratio 1.00 on both sides.
 
+**`pfn_` globals — report-only** (`BinResult.pfnPrepass` in `sweep.ts`, the `pfn*` fields of
+`auditGlobals`; `globals_<key>.jsonl` rows of kind `pfn` and `pfnRefused`; `peek-a-bin-5b6q.5`).
+*What it reports:* two halves that must agree. The pre-pass half, read from
+`af.calleeClobbers.pfn` and never recomputed: `GetProcAddress lookups` seen, slots `recognised`
+(with how many are `EncodePointer-wrapped`), and every `refused` shape by reason (`other-store`,
+`disagree`, `string-unknown`, `no-string-operand`, `unencodable-name`, `result-redefined`,
+`intervening-call`, `encode-arg`, `joined`, `no-store` — `disasm/pfnGlobals.ts`). The text half:
+`pfn_ declared` (one `extern intptr_t pfn_X;` per function per address, the address read from its
+comment), distinct addresses, mentions, `DecodePointer(pfn_X)` reads, every `((intptr_t (*)())…)`
+indirect cast and those whose value is a `pfn_` name directly, and `pfn_ outside a data section`
+(the pass does not consult the section table; a `pfn_` the table cannot place is a false claim —
+expect 0). *Measured at b613025 (`s30-pfn-wip`), t32/t64/w32/w64:* recognised **0/5/2/7** of
+1/6/3/8 lookups, encoded 0/5/0/5, refused 1/1/1/1 — all `intervening-call`, the `CorExitProcess`
+lookup every MSVC CRT here makes and calls through without storing; declared 0/5/2/7, mentions
+0/13/4/17, `DecodePointer` reads 0/2/0/2; **0 of 137/38/127/34 indirect casts read a `pfn_` name
+directly** — every call through a slot goes through a register with two reaching definitions, so
+the name is on the load one line above, not in the cast. *Why report-only:* a refusal is the pass
+declining to name, never a wrong name; the call site is deliberately not rewritten. *Liveness:*
+`lookups > 0` on every binary, `recognised + refused >= lookups` (a shared slot is one entry or
+several refusals), `pfnDistinct === recognised` (what was found is what reached the page), and
+`pfn_ declared > 0` wherever `recognised > 0` — t32 has no stored shape and the assertion says so
+rather than inventing one. *What it cannot see:* a store through a register or from another image
+(the reason the call is not rewritten), and whether the slot's pointer is ever rewritten at run
+time. `compare.mjs` shows every row; read `pfn_ OUTSIDE a data section` leaving 0 as a defect.
+
 ## `corpus/parserDifferential.ts` — separate, and the only oracle over the PE parser
 
 `npm run corpus:parserdiff`. Over **all six** binaries — the x86 four *and* the ARM64 pair —

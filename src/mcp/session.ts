@@ -13,6 +13,7 @@ import type { NamingContext } from "../disasm/decompile/naming";
 import { StructRegistry } from "../disasm/decompile/structs";
 import { buildFuncInsnMap } from "../disasm/funcInsns";
 import { buildIATLookup } from "../disasm/operands";
+import { recognisePfnGlobals } from "../disasm/pfnGlobals";
 import { jumpTableTargets } from "../disasm/seeds";
 import { type Seh32ScopeTable, seh32ScopeTableOfFunction } from "../disasm/seh32";
 import type { DisasmFunction, Instruction, Xref } from "../disasm/types";
@@ -327,6 +328,19 @@ export class FileSession {
     // accumulator" from one recogniser. Built for both widths, since the `/GS`
     // check is an x86 routine too.
     const funcInsnMap = arch === "x86" ? buildFuncInsnMap(functions, instructions) : undefined;
+    // The `GetProcAddress` results stored into globals (`pfnGlobals.ts`): the
+    // same pass and the same array, riding in the same record so the browser
+    // (`CallSummaryCache.forToken`), this session and `corpus/sweep.ts` name
+    // the same slots `pfn_<proc>` — and refuse the same ones.
+    const pfn = funcInsnMap
+      ? recognisePfnGlobals({
+          instructions,
+          funcExtents: functions,
+          iatMap,
+          stringMap,
+          is64,
+        })
+      : undefined;
     const calleeClobbers: CalleeClobbers = {
       // Both widths, as before: the PE32 closure is unread by the lifter but is
       // the `callee summaries` liveness row `corpus/sweep.ts` reports.
@@ -339,6 +353,7 @@ export class FileSession {
         : new Map(),
       unresolved: [],
       idioms: funcInsnMap ? recogniseCrtIdioms(funcInsnMap, is64) : undefined,
+      pfn,
     };
 
     // 8d. The naming evidence for the emitter — see `decompile/naming.ts`.
@@ -346,6 +361,7 @@ export class FileSession {
       dataRanges: dataSectionTable(pe.sections, imageBase),
       iatMap,
       securityCookie: pe.loadConfig?.securityCookie,
+      pfn: pfn?.globals,
     };
     // 8d. Each function's own EH4 scope table, for the trylevel annotations.
     //
