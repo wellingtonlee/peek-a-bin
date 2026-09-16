@@ -1636,6 +1636,39 @@ refused. **Read the long-form entry before changing the code it describes.**
   **`prologueDisagree` is a LIVENESS half, not a gate at 0**: the surviving population is exactly
   the `__chkstk` prologue (`mov eax, 0x1b30 / call __chkstk / sub rsp, rax`, one function per x64
   binary), where refusing is right, so the audit asserts it is **non-zero on x64 and zero on x86**.
+- **A `lea` of a named slot is spelled `&var_N`, and only while the stack pointer still holds what
+  the prologue left in it.** `lea rcx, [rsp + 0x30]` lifts to `rcx = rsp + 0x30` — a READ of the
+  stack pointer, and the read that refused the `sub rsp` deletion on most x64 functions.
+  `promote.ts`'s `promoteExpr` mints `irUnary("&", …)` for a bare `<sp>/<fp> ± const` that
+  `matchStackAccess` names (`UnaryOp` gains `"&"`: a union MEMBER, so no dispatch census).
+  **Restricted to the `± const` form deliberately** — `matchStackAccess` also answers for a bare
+  `rsp`, and rewriting `rbp = rsp` to `rbp = &var_0` would erase a read the strip pass asks about.
+  **`structs.ts`'s `isStackRooted` must read `&var` as a stack address** (one line): the same
+  expression used to arrive as `rsp + 0x30` and be caught by the binary arm, and without it the
+  frame is fabricated into a struct — measured, **14/2/8/2 extra struct definitions** with the line
+  removed, `offsetof` still 1.00 in both runs, which is that gate's documented blindness.
+  **`addressableSlot` is the refusal**: an `sp:` key may be named by address only at a program
+  point before `StackFrame.spMovesAt`, the first instruction past `prologueEnd` that moves the
+  stack pointer. Without it, t64 `sub_1400027C8`/`sub_14000C24C` print `rdi = &var_30` for a
+  `lea rdi, [rsp + 0x30]` that follows `call __chkstk` / `sub rsp, rax` — the `_alloca`'d buffer
+  named after the frame slot. A `bp:` key needs no such test; the frame register does not move.
+  **NOT a repair of the same blindness in the deref path**, which names `*(T*)(rsp + 0x30)`
+  `var_30` after an `_alloca` too — a standing defect measured and left, since repairing it moves
+  emitted output across the corpus. **SP-alias spills (`[r11 + 0x10]`) are refused on the same
+  evidence** and `StackFrame.spAliases` still has no reader in `promote.ts`: that operand is
+  ENTRY-relative while every `sp:` key is prologue-relative — 0x848 apart on t64 `sub_140001000` —
+  so the missing piece is an entry-relative slot KEY, not the plumbing. Same blocker as the
+  `mov`-based save/restore pairs of A4e, whose two halves carry different slot names for one
+  address (35/1/21/1 pairs measured, refused).
+- **`stackPointerScaffolding.writeNoRead` gates over ALL FOUR binaries, with ONE NAMED EXEMPTION
+  per x64 binary** (t64 `sub_14000664C`, w64 `sub_1400055CC`). Both are MSVC's early-out ahead of
+  the frame setup — `test rcx, rcx / je <end> / mov [rsp+0x10], rbx / push rdi / sub rsp, 0x20` —
+  where `inlineFrameGeometry` closes its extent at the `test` and returns at the `je`, so the
+  `sub rsp, 0x20` is never a candidate and refusal 3 keeps it. Recorded rather than repaired:
+  closing it needs either a widening of the walk (which moves `frameDelta`, and so `arg_N` naming,
+  for every function with a compare before its prologue) or dropping refusal 3 (which is what keeps
+  a mid-body `sub esp, 8`). The exemption is compared as a **LIST**, so it reddens both when a new
+  function joins and when one of these is finally fixed.
 
 ### UI, build and deployment
 

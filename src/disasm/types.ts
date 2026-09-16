@@ -171,6 +171,24 @@ export interface StackFrame {
    */
   prologueAlloc: number | null;
   /**
+   * The address of the first instruction PAST `prologueEnd` that moves the
+   * stack pointer — an `_alloca`'s `sub rsp, rax`, a `push`, the epilogue's
+   * own restore — or `null` when none does. `firstStackPointerMove` in
+   * `disasm/stack.ts` is the one place it is computed.
+   *
+   * It exists because every `sp:` slot key in this file is TEXTUAL: `[rsp +
+   * 0x30]` as Capstone spelled it, with no stack-pointer delta in it. That is
+   * only a slot identity while the register has not moved since the prologue,
+   * and from this address on it has. `decompile/promote.ts` consults it before
+   * spelling a `lea` as `&var_N`.
+   *
+   * `null` and `undefined` must read the same way, for `frameDelta`'s reason —
+   * but note the direction: here the safe reading of a missing field is "the
+   * stack pointer may move anywhere", which is why the consumer treats an
+   * absent value as a refusal rather than as permission.
+   */
+  spMovesAt: number | null;
+  /**
    * The addresses of the prologue stores that filled a home slot with its own
    * argument register — the instructions behind `homed` in
    * `inlineFrameGeometry`. Empty on x86 (no home space) and for every function

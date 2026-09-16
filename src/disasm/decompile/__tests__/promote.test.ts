@@ -51,11 +51,16 @@ function frameOf(...vars: StackVar[]): StackFrame {
  */
 const NO_PROLOGUE: Pick<
   StackFrame,
-  "prologueEnd" | "spWritesAt" | "prologueAlloc" | "homedAt" | "spAliases"
+  "prologueEnd" | "spWritesAt" | "prologueAlloc" | "spMovesAt" | "homedAt" | "spAliases"
 > = {
   prologueEnd: null,
   spWritesAt: [],
   prologueAlloc: null,
+  // `null` is "the stack pointer never moves again", the PERMISSIVE value for
+  // the `&var_N` spelling. The fixtures below are single-basic-block bodies
+  // with no `_alloca`, so it is also the true one; the refusal has its own
+  // case.
+  spMovesAt: null,
   homedAt: [],
   spAliases: [],
 };

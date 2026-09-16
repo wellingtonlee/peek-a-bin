@@ -833,6 +833,31 @@ describe("synthesizeStructs — base aliasing", () => {
     expect(out.typedefs?.[0].fields).toHaveLength(2);
   });
 
+  // `promote.ts` mints `&var_30` for a `lea rcx, [rsp + 0x30]`, which used to
+  // reach this pass as `rsp + 0x30` and be caught by `isStackRooted`'s binary
+  // arm. Without the unary arm the refusal is LOST and the frame is fabricated
+  // into a struct — the exact defect `stackDerivedBases` exists to prevent
+  // (peek-a-bin-5b6q.1).
+  it("reads &var_N as a stack address and refuses a struct over it", () => {
+    const rbx = irReg("rbx", 8);
+    const out = run([
+      assign(rbx, irUnary("&", irVar("var_30", 8))),
+      assign(irReg("eax", 4), at(rbx, 0)),
+      assign(irReg("edx", 4), at(rbx, 8)),
+    ]);
+    expect(out.typedefs ?? []).toHaveLength(0);
+
+    // Control, and it has to be here: the same two accesses through a base that
+    // is NOT a stack address are a struct, so the row above is a refusal rather
+    // than a pass that stopped synthesising.
+    const notStack = run([
+      assign(rbx, RCX),
+      assign(irReg("eax", 4), at(rbx, 0)),
+      assign(irReg("edx", 4), at(rbx, 8)),
+    ]);
+    expect(notStack.typedefs).toHaveLength(1);
+  });
+
   it("does not loop forever on a circular alias", () => {
     const out = run([
       assign(irReg("rbx", 8), RCX),

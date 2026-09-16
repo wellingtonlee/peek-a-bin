@@ -51,7 +51,20 @@ export interface IRBinary {
   right: IRExpr;
 }
 
-export type UnaryOp = "~" | "!" | "-";
+/**
+ * `"&"` is ADDRESS-OF, and it is the one member produced by a later pass rather
+ * than by the lifter: `promote.ts` mints it for a bare `<sp>/<fp> ± const` that
+ * `matchStackAccess` names, so `lea rcx, [rsp + 0x30]` prints `rcx = &var_30`
+ * instead of `rcx = rsp + 0x30` (peek-a-bin-5b6q.1). A union MEMBER and not a
+ * new `IRExpr` kind, deliberately: no dispatch switch gains a case, and the
+ * only sites that read an operator rather than recursing are `fold.ts`'s
+ * constant fold and double-negation rule — both of which name `~`/`!`/`-`
+ * explicitly and so decline it — and `emit.ts`'s unary arm, which prints
+ * operator then operand at binding tighter than anything. `promoteVars` runs
+ * AFTER `foldBlock` and `inferTypes` and BEFORE `synthesizeStructs`, so only
+ * `structs.ts`, `decompile/prologue.ts` and the emitter ever see one.
+ */
+export type UnaryOp = "~" | "!" | "-" | "&";
 
 export interface IRUnary {
   kind: "unary";

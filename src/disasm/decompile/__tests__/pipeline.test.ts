@@ -10473,6 +10473,96 @@ describe("decompileFunction — frame scaffolding is deleted only where nothing 
   });
 
   /**
+   * THE SLOT'S ADDRESS (peek-a-bin-5b6q.1, commit c). `lea rcx, [rsp + 0x30]`
+   * lifts to `rcx = rsp + 0x30` — a read of the stack pointer, and the read
+   * that refused the `sub rsp` deletion on most x64 functions. Promotion spells
+   * it `&var_30`, and the second case is why that is not unconditional.
+   */
+  describe("a lea of a named slot is its address", () => {
+    it("x64: lea rcx, [rsp + 0x30] spells &var_30 and the allocation goes", () => {
+      const { code, report } = runStrip(
+        seq(0x401000, [
+          ["sub", "rsp, 0x48"],
+          ["mov", "dword ptr [rsp + 0x30], 1"],
+          ["lea", "rcx, [rsp + 0x30]"],
+          ["call", "0x402000"],
+          ["add", "rsp, 0x48"],
+          ["ret"],
+        ]),
+        true,
+      );
+      expect(code).toContain("&var_30");
+      expect(mentions(code, /\brsp\b/g)).toBe(0);
+      expect(report?.deleted["sp-alloc"]).toBe(1);
+    });
+
+    it("x86: lea eax, [ebp - 4] spells &var_4 and the frame establishment goes", () => {
+      const { code } = runStrip(
+        seq(0x401000, [
+          ["push", "ebp"],
+          ["mov", "ebp, esp"],
+          ["sub", "esp, 8"],
+          ["mov", "dword ptr [ebp - 4], 1"],
+          ["lea", "eax, [ebp - 4]"],
+          ["push", "eax"],
+          ["call", "0x402000"],
+          ["add", "esp, 4"],
+          ["leave"],
+          ["ret"],
+        ]),
+      );
+      expect(code).toContain("&var_4");
+      expect(mentions(code, /\be[sb]p\b/g)).toBe(0);
+    });
+
+    it("REFUSES the spelling once the stack pointer has moved — the _alloca shape", () => {
+      // `sub rsp, rax` is `_alloca`: `[rsp + 0x30]` after it is the allocated
+      // buffer, NOT the frame slot of that name. t64 `sub_1400027C8` and
+      // `sub_14000C24C` are this shape, and without the test they printed
+      // `rdi = &var_30` for a `lea rdi, [rsp + 0x30]` sixteen bytes elsewhere.
+      const { code, report } = runStrip(
+        seq(0x401000, [
+          ["sub", "rsp, 0x48"],
+          ["mov", "dword ptr [rsp + 0x30], 1"],
+          ["lea", "rcx, [rsp + 0x30]"],
+          ["call", "0x402000"],
+          ["sub", "rsp, rax"],
+          ["lea", "rdi, [rsp + 0x30]"],
+          ["mov", "rcx, rdi"],
+          ["call", "0x402000"],
+          ["ret"],
+        ]),
+        true,
+      );
+      // Before the move it is still the slot…
+      expect(code).toContain("&var_30");
+      // …and after it, the arithmetic stands, which keeps the allocation too.
+      expect(code).toContain("rsp + 0x30");
+      expect(code).toContain("rsp -= 0x48;");
+      expect(report?.deleted["sp-alloc"]).toBe(0);
+      expect(report?.spReadsKept).toContain("alloca");
+    });
+
+    it("leaves a bare frame-register copy alone — only `± const` is a slot address", () => {
+      // `rbp = rsp` must stay a READ of the stack pointer: rewriting it to
+      // `rbp = &var_0` would erase the read `stripFrameScaffolding` asks about.
+      const { code } = runStrip(
+        seq(0x401000, [
+          ["sub", "rsp, 0x28"],
+          ["mov", "qword ptr [rsp], 1"],
+          ["mov", "rbx, rsp"],
+          ["mov", "rax, qword ptr [rbx]"],
+          ["add", "rsp, 0x28"],
+          ["ret"],
+        ]),
+        true,
+      );
+      expect(code).toContain("= rsp;");
+      expect(code).not.toContain("&var_0");
+    });
+  });
+
+  /**
    * THE SECOND WITNESS (peek-a-bin-5b6q.1(b)). Where the image carries an x64
    * `UNWIND_INFO`, the linker's own record of the prolog and `stack.ts`'s
    * reading of it must agree or the whole function is refused — nothing is

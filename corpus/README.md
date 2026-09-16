@@ -987,12 +987,18 @@ the x64 pair and 0 on x86** (which has no `.pdata` and therefore no second witne
 it at 0 would mean weakening the comparison until it stopped discriminating. `compare.mjs` flags
 both directions — a rise is a new disagreement, a fall to zero a witness gone quiet.
 *Negative controls:* skipping the pass reddens the gate on all four
-binaries (4/18/17/4 at 6299113); dropping the function-wide read check reddens `pipeline.test.ts`'s
-"a mid-body sub esp stays and keeps the prologue". *What it cannot see:* a write that IS read —
-the refusals are the report rows, and a rise in `mentioning` is read against them; and whether the
-C that remains is right, which is polarity's and the gcc gate's to say. **Gated on x86 from
-commit a; x64 joins at commit c**, whose `&var` spelling and `rsp_1` aliasing are what take the
-x64 row 18/17 → 0/0.
+binaries (4/33/34/4 at commit c — x64's figure is nearly double commit a's 18/17, because the
+`&var_N` spelling removed the reads that were masking them); dropping the function-wide read check
+reddens five `pipeline.test.ts` cases including the `_alloca` one. *What it cannot see:* a write
+that IS read — the refusals are the report rows, and a rise in `mentioning` is read against them;
+and whether the C that remains is right, which is polarity's and the gcc gate's to say. **Gated on
+x86 from commit a and on ALL FOUR from commit c**, where the row is 0/1/1/0 and the two x64 ones
+are NAMED exemptions rather than a skipped assertion: t64 `sub_14000664C` and w64 `sub_1400055CC`,
+both MSVC's early-out ahead of the frame setup (`test rcx, rcx / je <end> / mov [rsp+0x10], rbx /
+push rdi / sub rsp, 0x20`), where `inlineFrameGeometry` closes its extent at the `test` and returns
+at the `je`, so the `sub rsp, 0x20` is never a candidate. The list is compared as a LIST, so it
+reddens both when a new function joins and when one of these is fixed — see `docs/gotchas.md` for
+the two candidate repairs and why neither belongs in commit c.
 
 ### Baselines — reported, never gated
 

@@ -3,7 +3,7 @@ import { stackVarKey } from "../stack";
 import type { StackFrame } from "../types";
 import { entryBindings } from "./entryBindings";
 import type { IRCall, IRExpr, IRFunction, IRLocal, IRParam, IRStmt } from "./ir";
-import { bodiesOf, irVar, mapCallOperands, rewriteBodies, walkStmts } from "./ir";
+import { bodiesOf, irUnary, irVar, mapCallOperands, rewriteBodies, walkStmts } from "./ir";
 import type { TypeContext } from "./typeInfer";
 import { typeToString } from "./typeInfer";
 import { renameableIdentClass, TYPE_BASED_NAMES, validateVarName } from "./userNames";
@@ -438,13 +438,44 @@ function matchStackAccess(
 
 // ── Expression / Statement rewriting ──
 
-function promoteExpr(
-  expr: IRExpr,
-  is64: boolean,
-  varLookup: Map<string, string>,
-  paramLookup: Map<string, string>,
-  bpAliases: ReadonlySet<string>,
-): IRExpr {
+/**
+ * What the two rewriters need, bundled because the `&var_N` spelling added a
+ * fifth thing and five positional parameters repeated at thirty-odd recursive
+ * call sites is where a threading mistake hides.
+ */
+interface PromoteCtx {
+  is64: boolean;
+  varLookup: Map<string, string>;
+  paramLookup: Map<string, string>;
+  bpAliases: ReadonlySet<string>;
+  /** `StackFrame.spMovesAt` — see {@link addressableSlot}. */
+  spMovesAt: number | null;
+}
+
+/**
+ * May a slot be named by ADDRESS at this program point?
+ *
+ * `[rbp - 0x10]` may always be: the frame register does not move once
+ * established, which is the premise `frameRegisterAliases` and
+ * `structs.ts`'s `stackDerivedBases` already run on. `[rsp + 0x30]` may only be
+ * while the stack pointer still holds what the prologue left in it — the slot
+ * keys in this file are TEXTUAL, with no stack-pointer delta in them, so from
+ * `StackFrame.spMovesAt` on the same text denotes a different address.
+ *
+ * Measured at peek-a-bin-5b6q.1: without this test, t64 `sub_1400027C8` and
+ * `sub_14000C24C` print `rdi = &var_30` for a `lea rdi, [rsp + 0x30]` that
+ * follows `call __chkstk` / `sub rsp, rax` — naming the `_alloca`'d buffer
+ * after the frame slot sixteen bytes from where it actually is. A missing
+ * address refuses, and so does a missing `spMovesAt`, because the safe reading
+ * of "not said" here is "the stack pointer may have moved".
+ */
+function addressableSlot(access: StackAccess, at: number | undefined, spMovesAt: number | null) {
+  if (access.base === "bp") return true;
+  return spMovesAt === null || (at !== undefined && at < spMovesAt);
+}
+
+function promoteExpr(expr: IRExpr, ctx: PromoteCtx, at: number | undefined): IRExpr {
+  const { is64, varLookup, paramLookup, bpAliases } = ctx;
   // Check if this is a stack variable deref
   const stackAccess = matchStackAccess(expr, is64, bpAliases);
   if (stackAccess) {
@@ -455,63 +486,87 @@ function promoteExpr(
     }
   }
 
+  // …and the ADDRESS of one. `lea rcx, [rsp + 0x30]` lifts to `rcx = rsp +
+  // 0x30`, which promotion used to leave alone — a read of the stack pointer
+  // in the emitted C, and the read that refused `decompile/prologue.ts`'s
+  // deletion of the `sub rsp` on most x64 functions (`unnamed-slot`, 58/56 at
+  // b57b9c3). The slot is one promotion already names; what the expression
+  // denotes is its address, so it is spelled `&var_30`.
+  //
+  // **Restricted to the BINARY form on purpose.** `matchStackAccess` also
+  // answers for a bare `rsp` or `rbp` with no displacement, and rewriting one
+  // of those would turn the frame establishment `rbp = rsp` into `rbp =
+  // &var_0` — erasing a stack-pointer READ that `stripFrameScaffolding` asks
+  // about, for a slot that exists only when something happened to dereference
+  // `[rsp]`. The `±const` form is the `lea` population and nothing else.
+  if (expr.kind === "binary") {
+    const address = matchStackAccess({ kind: "deref", address: expr, size: 1 }, is64, bpAliases);
+    if (address && addressableSlot(address, at, ctx.spMovesAt)) {
+      const name = (address.aboveFrame ? paramLookup : varLookup).get(address.key);
+      // The unary's operand is the VARIABLE, so its size is the pointer's —
+      // nothing reads it as the slot's width, and the slot's own declaration
+      // comes from `stackFrame.vars` rather than from here.
+      if (name) return irUnary("&", irVar(name, is64 ? 8 : 4));
+    }
+  }
+
   switch (expr.kind) {
     case "binary":
       return {
         ...expr,
-        left: promoteExpr(expr.left, is64, varLookup, paramLookup, bpAliases),
-        right: promoteExpr(expr.right, is64, varLookup, paramLookup, bpAliases),
+        left: promoteExpr(expr.left, ctx, at),
+        right: promoteExpr(expr.right, ctx, at),
       };
     case "unary":
       return {
         ...expr,
-        operand: promoteExpr(expr.operand, is64, varLookup, paramLookup, bpAliases),
+        operand: promoteExpr(expr.operand, ctx, at),
       };
     case "deref":
       return {
         ...expr,
-        address: promoteExpr(expr.address, is64, varLookup, paramLookup, bpAliases),
+        address: promoteExpr(expr.address, ctx, at),
       };
     case "call":
       // The target of an indirect call is promoted like any other read, which
       // is what turns `call dword ptr [ebp + 8]` into a call through `arg_0`.
-      return mapCallOperands(expr, (a) => promoteExpr(a, is64, varLookup, paramLookup, bpAliases));
+      return mapCallOperands(expr, (a) => promoteExpr(a, ctx, at));
     case "ternary":
       return {
         ...expr,
-        condition: promoteExpr(expr.condition, is64, varLookup, paramLookup, bpAliases),
-        then: promoteExpr(expr.then, is64, varLookup, paramLookup, bpAliases),
-        else: promoteExpr(expr.else, is64, varLookup, paramLookup, bpAliases),
+        condition: promoteExpr(expr.condition, ctx, at),
+        then: promoteExpr(expr.then, ctx, at),
+        else: promoteExpr(expr.else, ctx, at),
       };
     case "cast":
       return {
         ...expr,
-        operand: promoteExpr(expr.operand, is64, varLookup, paramLookup, bpAliases),
+        operand: promoteExpr(expr.operand, ctx, at),
       };
     case "field_access":
-      return { ...expr, base: promoteExpr(expr.base, is64, varLookup, paramLookup, bpAliases) };
+      return { ...expr, base: promoteExpr(expr.base, ctx, at) };
     case "array_access":
       return {
         ...expr,
-        base: promoteExpr(expr.base, is64, varLookup, paramLookup, bpAliases),
-        index: promoteExpr(expr.index, is64, varLookup, paramLookup, bpAliases),
+        base: promoteExpr(expr.base, ctx, at),
+        index: promoteExpr(expr.index, ctx, at),
       };
     default:
       return expr;
   }
 }
 
-function promoteStmt(
-  stmt: IRStmt,
-  is64: boolean,
-  varLookup: Map<string, string>,
-  paramLookup: Map<string, string>,
-  bpAliases: ReadonlySet<string>,
-): IRStmt {
+function promoteStmt(stmt: IRStmt, ctx: PromoteCtx): IRStmt {
+  const { is64, varLookup, paramLookup, bpAliases } = ctx;
+  // Every expression in a statement is at that statement's address, which is
+  // what `addressableSlot` needs to decide whether the stack pointer has
+  // already moved. A structured statement carries none, and an absent address
+  // is treated as "after the move" — the refusing direction.
+  const at = "addr" in stmt ? stmt.addr : undefined;
   switch (stmt.kind) {
     case "assign": {
-      const dest = promoteExpr(stmt.dest, is64, varLookup, paramLookup, bpAliases);
-      const src = promoteExpr(stmt.src, is64, varLookup, paramLookup, bpAliases);
+      const dest = promoteExpr(stmt.dest, ctx, at);
+      const src = promoteExpr(stmt.src, ctx, at);
       return { ...stmt, dest, src };
     }
     case "store": {
@@ -529,77 +584,69 @@ function promoteStmt(
           return {
             kind: "assign",
             dest: irVar(name, stmt.size),
-            src: promoteExpr(stmt.value, is64, varLookup, paramLookup, bpAliases),
+            src: promoteExpr(stmt.value, ctx, at),
             addr: stmt.addr,
           };
         }
       }
       return {
         ...stmt,
-        address: promoteExpr(stmt.address, is64, varLookup, paramLookup, bpAliases),
-        value: promoteExpr(stmt.value, is64, varLookup, paramLookup, bpAliases),
+        address: promoteExpr(stmt.address, ctx, at),
+        value: promoteExpr(stmt.value, ctx, at),
       };
     }
     case "call_stmt":
       return {
         ...stmt,
-        call: promoteExpr(stmt.call, is64, varLookup, paramLookup, bpAliases) as IRExpr & {
+        call: promoteExpr(stmt.call, ctx, at) as IRExpr & {
           kind: "call";
         },
       };
     case "return":
-      return stmt.value
-        ? { ...stmt, value: promoteExpr(stmt.value, is64, varLookup, paramLookup, bpAliases) }
-        : stmt;
+      return stmt.value ? { ...stmt, value: promoteExpr(stmt.value, ctx, at) } : stmt;
     case "if":
       return {
         ...stmt,
-        condition: promoteExpr(stmt.condition, is64, varLookup, paramLookup, bpAliases),
-        thenBody: stmt.thenBody.map((s) => promoteStmt(s, is64, varLookup, paramLookup, bpAliases)),
-        elseBody: stmt.elseBody?.map((s) =>
-          promoteStmt(s, is64, varLookup, paramLookup, bpAliases),
-        ),
+        condition: promoteExpr(stmt.condition, ctx, at),
+        thenBody: stmt.thenBody.map((s) => promoteStmt(s, ctx)),
+        elseBody: stmt.elseBody?.map((s) => promoteStmt(s, ctx)),
       };
     case "while":
       return {
         ...stmt,
-        condition: promoteExpr(stmt.condition, is64, varLookup, paramLookup, bpAliases),
-        body: stmt.body.map((s) => promoteStmt(s, is64, varLookup, paramLookup, bpAliases)),
+        condition: promoteExpr(stmt.condition, ctx, at),
+        body: stmt.body.map((s) => promoteStmt(s, ctx)),
       };
     case "do_while":
       return {
         ...stmt,
-        condition: promoteExpr(stmt.condition, is64, varLookup, paramLookup, bpAliases),
-        body: stmt.body.map((s) => promoteStmt(s, is64, varLookup, paramLookup, bpAliases)),
+        condition: promoteExpr(stmt.condition, ctx, at),
+        body: stmt.body.map((s) => promoteStmt(s, ctx)),
       };
     case "switch":
       return {
         ...stmt,
-        expr: promoteExpr(stmt.expr, is64, varLookup, paramLookup, bpAliases),
+        expr: promoteExpr(stmt.expr, ctx, at),
         cases: stmt.cases.map((c) => ({
           ...c,
-          body: c.body.map((s) => promoteStmt(s, is64, varLookup, paramLookup, bpAliases)),
+          body: c.body.map((s) => promoteStmt(s, ctx)),
         })),
-        defaultBody: stmt.defaultBody?.map((s) =>
-          promoteStmt(s, is64, varLookup, paramLookup, bpAliases),
-        ),
+        defaultBody: stmt.defaultBody?.map((s) => promoteStmt(s, ctx)),
       };
     case "for":
       return {
         ...stmt,
-        init: promoteStmt(stmt.init, is64, varLookup, paramLookup, bpAliases),
-        condition: promoteExpr(stmt.condition, is64, varLookup, paramLookup, bpAliases),
-        update: promoteStmt(stmt.update, is64, varLookup, paramLookup, bpAliases),
-        body: stmt.body.map((s) => promoteStmt(s, is64, varLookup, paramLookup, bpAliases)),
+        init: promoteStmt(stmt.init, ctx),
+        condition: promoteExpr(stmt.condition, ctx, at),
+        update: promoteStmt(stmt.update, ctx),
+        body: stmt.body.map((s) => promoteStmt(s, ctx)),
       };
     case "try":
       return {
         ...stmt,
-        body: stmt.body.map((s) => promoteStmt(s, is64, varLookup, paramLookup, bpAliases)),
-        handler: stmt.handler.map((s) => promoteStmt(s, is64, varLookup, paramLookup, bpAliases)),
-        filterExpr: stmt.filterExpr
-          ? promoteExpr(stmt.filterExpr, is64, varLookup, paramLookup, bpAliases)
-          : undefined,
+        body: stmt.body.map((s) => promoteStmt(s, ctx)),
+        handler: stmt.handler.map((s) => promoteStmt(s, ctx)),
+        filterExpr: stmt.filterExpr ? promoteExpr(stmt.filterExpr, ctx, at) : undefined,
       };
     default:
       return stmt;
@@ -914,6 +961,20 @@ export function promoteVars(
   // Infer variable types from access patterns
   inferVarTypes(body, locals, is64, varLookup, paramLookup, bpAliases);
 
+  // `?? null` for `frameDelta`'s reason — the shape crosses a worker boundary —
+  // but note the direction here: an absent `spMovesAt` must read as "the stack
+  // pointer may move", which is the REFUSING value for `addressableSlot`, and
+  // `null` is the permitting one. So a frame that never reported the field at
+  // all (an older sender, ARM64's `.pdata` frame) permits, exactly as it did
+  // before the field existed; what refuses is a frame that names an address.
+  const promoteCtx: PromoteCtx = {
+    is64,
+    varLookup,
+    paramLookup,
+    bpAliases,
+    spMovesAt: stackFrame?.spMovesAt ?? null,
+  };
+
   // Promote body — and drop the identities promotion itself creates. A homed
   // spill `mov [rsp+8], rcx` promotes to `arg_0 = arg_0` once the register's
   // entry value is bound to the parameter: a store of the argument into the
@@ -921,7 +982,7 @@ export function promoteVars(
   // the program. See `dropParameterIdentities`.
   const paramNames = new Set(params.map((p) => p.name));
   const promoted = dropParameterIdentities(
-    body.map((s) => promoteStmt(s, is64, varLookup, paramLookup, bpAliases)),
+    body.map((s) => promoteStmt(s, promoteCtx)),
     paramNames,
   );
   const promotedForTypes = promoted;

@@ -1188,6 +1188,13 @@ function stackDerivedBases(func: IRFunction, canonBase: (e: IRExpr) => string): 
   /** A stack address: the pointer itself, a copy of one, or one biased by a constant. */
   function isStackRooted(e: IRExpr): boolean {
     if (e.kind === "reg" || e.kind === "var") return derived.has(canonBase(e));
+    // `&var_30` is a stack address BY CONSTRUCTION: `promote.ts` mints the `&`
+    // only for a `<sp>/<fp> ± const` that `matchStackAccess` named, i.e. for a
+    // slot of this function's own frame. Before the `&` spelling landed the
+    // same expression reached here as `rsp + 0x30` and was caught by the
+    // binary arm below, so without this line the refusal is silently LOST and
+    // a struct is fabricated over the frame (peek-a-bin-5b6q.1).
+    if (e.kind === "unary" && e.op === "&") return true;
     if (e.kind === "cast") return isStackRooted(e.operand);
     if (e.kind === "binary" && (e.op === "+" || e.op === "-")) {
       if (e.right.kind === "const") return isStackRooted(e.left);

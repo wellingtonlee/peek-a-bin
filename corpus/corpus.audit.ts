@@ -1480,13 +1480,49 @@ if (!pre.haveBins || !pre.haveCc) {
     });
 
     /**
-     * Stack-pointer scaffolding. GATED since peek-a-bin-5b6q.1: a function
-     * whose emitted C WRITES the stack pointer and never reads it is a dead
-     * definition `prologue.ts`'s `stripFrameScaffolding` failed to delete, and
-     * the text scan knows nothing about that pass, which is what makes it the
-     * gate. Negative control: skip the pass and 4/18/17/4 (at 6299113) go red.
-     * `mentioning` stays the liveness half — the /GS cookie mix and unnamed
-     * slots keep it non-zero by design.
+     * THE ONE FUNCTION PER x64 BINARY THE PASS CANNOT REACH, named rather than
+     * subtracted (peek-a-bin-5b6q.1, commit c).
+     *
+     * Both are the same MSVC shape: an early-out ahead of the frame setup —
+     * `test rcx, rcx / je <end> / mov [rsp+0x10], rbx / push rdi / sub rsp,
+     * 0x20`. `inlineFrameGeometry` closes its extent at the `test` (it reads
+     * the first operand of any instruction as a register write, and `test`
+     * writes only flags) and then returns at the `je`, so `prologueEnd` is null
+     * and `spWritesAt` is empty; the `sub rsp, 0x20` is therefore not a
+     * CANDIDATE and `stripFrameScaffolding`'s refusal 3 — the address test —
+     * keeps it. The emitted `rsp -= 0x20;` is true about the machine and dead
+     * in the C.
+     *
+     * Closing it needs one of two changes, and neither belongs here. Teaching
+     * the walk to read past a guarded head would widen the function whose own
+     * docstring warns at length about widening, and would move `frameDelta`
+     * recovery — and therefore `arg_N` naming — for every function with a
+     * compare before its prologue. Admitting any `sub <sp>, imm` as a candidate
+     * would drop refusal 3, which is what keeps a mid-body `sub esp, 8` and is
+     * negative-controlled by `pipeline.test.ts`.
+     *
+     * Naming them is the `DOC_ONLY_KEYS` discipline: an exemption must name a
+     * member of the population, so this list goes red both when a NEW function
+     * joins and when one of these is finally deleted.
+     */
+    const EARLY_OUT_PROLOGUE: Record<string, readonly string[]> = {
+      t64: ["sub_14000664C"],
+      w64: ["sub_1400055CC"],
+    };
+
+    /**
+     * Stack-pointer scaffolding. GATED since peek-a-bin-5b6q.1, over ALL FOUR
+     * binaries since commit (c): a function whose emitted C WRITES the stack
+     * pointer and never reads it is a dead definition `prologue.ts`'s
+     * `stripFrameScaffolding` failed to delete, and the text scan knows nothing
+     * about that pass, which is what makes it the gate. Negative control: skip
+     * the pass and 4/18/17/4 (at 6299113) go red. `mentioning` stays the
+     * liveness half — the /GS cookie mix and unnamed slots keep it non-zero by
+     * design.
+     *
+     * The x64 pair carries one NAMED exemption each; see `EARLY_OUT_PROLOGUE`
+     * for the shape and for why it is recorded rather than repaired. The rows
+     * are compared as a LIST, so the exemption cannot quietly grow.
      */
     it("leaves no stack-pointer write the emitted C never reads", () => {
       for (const r of results.values()) {
@@ -1494,14 +1530,11 @@ if (!pre.haveBins || !pre.haveCc) {
         expect(`${r.key}: funcs=${sp.funcs > 0} mentioning=${sp.mentioning > 0}`).toBe(
           `${r.key}: funcs=true mentioning=true`,
         );
-        // x86 gates from commit (a) of peek-a-bin-5b6q.1; x64 joins in commit
-        // (c), which names the `lea rcx, [rsp + N]` slot addresses and the
-        // `rsp_1` split versions that keep most x64 allocations today.
-        if (r.is64) continue;
+        const exempt = EARLY_OUT_PROLOGUE[r.key] ?? [];
         expect(`${r.key} write-and-never-read: ${sp.rows.join(", ")}`).toBe(
-          `${r.key} write-and-never-read: `,
+          `${r.key} write-and-never-read: ${exempt.join(", ")}`,
         );
-        expect(sp.writeNoRead).toBe(0);
+        expect(sp.writeNoRead).toBe(exempt.length);
       }
     });
 
@@ -2431,16 +2464,20 @@ function renderReport(): string {
     const sp = stackPointerScaffolding([{ funcs: r.funcs }]);
     L.push(
       `  stack-pointer scaffolding   ${sp.mentioning}/${sp.funcs} functions mention it, ` +
-        `${sp.writeNoRead} write it and never read it (GATE 0); ${sp.reads} reads, ${sp.writes} writes; ` +
+        `${sp.writeNoRead} write it and never read it (GATED; 0 but for the named exemptions); ` +
+        `${sp.reads} reads, ${sp.writes} writes; ` +
         `shapes: ${sp.copies} copies, ${sp.subs} -=, ${sp.adds} +=, ${sp.offsets} +0x, ` +
         `${sp.xors} ^; ${sp.unliftedLeave} unlifted leave` +
         (sp.rows.length > 0 ? `  [${sp.rows.slice(0, 6).join(", ")}]` : ""),
     );
-    L.push("    `write and never read` GATES at 0 since peek-a-bin-5b6q.1: a dead stack-pointer");
-    L.push("    definition `prologue.ts` failed to delete. The other rows are the refusals —");
-    L.push(
-      "    the /GS cookie mix, unnamed slots, alloca — and are REPORT-ONLY; see the line below.",
-    );
+    L.push("    `write and never read` is GATED since peek-a-bin-5b6q.1, over all four binaries");
+    L.push("    since commit (c): a dead stack-pointer definition `prologue.ts` failed to delete.");
+    L.push("    The x64 pair carries ONE NAMED exemption each (t64 sub_14000664C, w64");
+    L.push("    sub_1400055CC) — MSVC's early-out ahead of the frame setup, where the prologue");
+    L.push("    walk stops at the guard so the `sub rsp, 0x20` is never a candidate; the gate");
+    L.push("    compares the LIST, so it reddens when one joins AND when one is fixed. The other");
+    L.push("    rows are the refusals — the /GS cookie mix, unnamed slots, alloca — and are");
+    L.push("    REPORT-ONLY; see the line below.");
     const ps = r.prologueStrip;
     L.push(
       `  frame scaffolding pass      ${ps.framed}/${ps.funcs} framed; candidates ${shapeLine(ps.candidates)}; ` +

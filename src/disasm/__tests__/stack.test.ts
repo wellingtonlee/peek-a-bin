@@ -1142,6 +1142,63 @@ describe("analyzeStackFrame — the prologue extent and its arithmetic", () => {
    * against it rather than against `frameSize`. Both halves are asserted here
    * so the divergence is a pinned fact rather than a surprise.
    */
+  /**
+   * `spMovesAt` — from where on `[<sp> + N]` stops meaning what it meant in the
+   * prologue. `promote.ts`'s `&var_N` spelling is the one consumer
+   * (peek-a-bin-5b6q.1).
+   */
+  it("names the first stack-pointer move past the prologue, and nothing inside it", () => {
+    const insns = body(
+      ["push", "rbx"],
+      ["sub", "rsp, 0x28"],
+      ["lea", "rcx, [rsp + 0x20]"],
+      ["call", "0x402000"],
+      ["sub", "rsp, rax"],
+      ["lea", "rdi, [rsp + 0x20]"],
+      ["mov", "dword ptr [rdi], 1"],
+    );
+    const frame = analyzeStackFrame(func(insns.length * 4), insns, "x86", true)!;
+    // The prologue's own `push` and `sub` are what FIXED the register, and a
+    // `call` puts it back — so the answer is the `sub rsp, rax` at index 4.
+    expect(frame.spMovesAt).toBe(0x1010);
+    expect(frame.prologueEnd).toBe(0x1008);
+  });
+
+  it("answers null when the stack pointer never moves again", () => {
+    const insns = body(
+      ["sub", "rsp, 0x28"],
+      ["mov", "dword ptr [rsp + 0x20], 1"],
+      ["mov", "eax, dword ptr [rsp + 0x20]"],
+    );
+    expect(analyzeStackFrame(func(insns.length * 4), insns, "x86", true)?.spMovesAt).toBeNull();
+  });
+
+  it("counts a store THROUGH the stack pointer as no move at all", () => {
+    // `mov [rsp + 8], rbx` writes memory; the register is untouched.
+    const insns = body(
+      ["sub", "rsp, 0x28"],
+      ["mov", "qword ptr [rsp + 8], rbx"],
+      ["mov", "rax, qword ptr [rsp + 8]"],
+    );
+    expect(analyzeStackFrame(func(insns.length * 4), insns, "x86", true)?.spMovesAt).toBeNull();
+  });
+
+  it("scans the whole function when the walk read no prologue at all", () => {
+    // MSVC's early-out: the walk stops at the guard, so there is no extent and
+    // every stack-pointer move counts — the conservative reading.
+    const insns = body(
+      ["test", "rcx, rcx"],
+      ["je", "0x1030"],
+      ["push", "rdi"],
+      ["sub", "rsp, 0x20"],
+      ["mov", "dword ptr [rsp + 0x10], 1"],
+      ["mov", "eax, dword ptr [rsp + 0x10]"],
+    );
+    const frame = analyzeStackFrame(func(insns.length * 4), insns, "x86", true)!;
+    expect(frame.prologueEnd).toBeNull();
+    expect(frame.spMovesAt).toBe(0x1008);
+  });
+
   it("reads an allocation the ten-instruction frameSize scan cannot reach", () => {
     const insns = body(
       ["mov", "rax, rsp"],

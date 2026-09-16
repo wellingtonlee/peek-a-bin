@@ -294,6 +294,7 @@ export function analyzeArm64StackFrame(
     // `inlineFrameGeometry`, and `decompile/prologue.ts` declines on A64.
     prologueEnd: null,
     prologueAlloc: null,
+    spMovesAt: null,
     spWritesAt: [],
     homedAt: [],
     spAliases: [],

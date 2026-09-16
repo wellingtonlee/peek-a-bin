@@ -859,6 +859,87 @@ function inUnfilledHomeSpace(
 }
 
 /**
+ * Mnemonics whose NET effect leaves the stack pointer somewhere else — see
+ * {@link firstStackPointerMove}.
+ *
+ * Deliberately NOT `stackIdiom.ts`'s `STACK_TRAFFIC`, which answers a different
+ * question (what can a `pop` not be paired across) and therefore includes
+ * `call` and `int`. A `call` moves the stack pointer and puts it back, so after
+ * one the register holds what it held before; treating it as a move would make
+ * this answer the first `call` in almost every function and the one consumer
+ * would refuse everything.
+ */
+const SP_MOVING_MNEMONICS = new Set([
+  "push",
+  "pusha",
+  "pushad",
+  "pushf",
+  "pushfd",
+  "pushfq",
+  "pop",
+  "popa",
+  "popad",
+  "popf",
+  "popfd",
+  "popfq",
+  "leave",
+  "enter",
+  "iret",
+  "iretd",
+  "iretq",
+]);
+
+/**
+ * The address of the first instruction PAST the prologue that moves the stack
+ * pointer, or `null` when none does — `StackFrame.spMovesAt`.
+ *
+ * The question it answers is "from where on does `[<sp> + N]` stop meaning what
+ * it meant in the prologue". Slot keys are textual — `stackVarKey("sp", N)` is
+ * `[rsp + N]` as Capstone spelled it, with no stack-pointer delta in it — so
+ * every `sp:` name in this file silently assumes the register has not moved
+ * since the prologue fixed it. Where it HAS moved, the assumption is false from
+ * that instruction on: `promote.ts`'s `&var_N` spelling of a `lea` consults
+ * this so it cannot claim that an `_alloca`'d buffer at `[rsp + 0x30]` is the
+ * frame slot of the same name — which is what it did on t64 `sub_1400027C8`
+ * and `sub_14000C24C`, where `lea rdi, [rsp + 0x30]` follows `call __chkstk` /
+ * `sub rsp, rax` (peek-a-bin-5b6q.1).
+ *
+ * The scan starts at `prologueEnd`, so the prologue's own pushes and its
+ * `sub <sp>, imm` are not moves — they are what fixed the register — and it
+ * starts at the function's first instruction when the walk read no extent at
+ * all, which is the conservative reading. A trailing epilogue is found and that
+ * is harmless: it is after every use, so a consumer comparing addresses is
+ * unaffected.
+ *
+ * **NOT a repair of the same blindness in the deref path.** `matchStackAccess`
+ * names `*(T*)(rsp + 0x30)` `var_30` wherever it appears, after an `_alloca`
+ * included, and that is a standing defect measured and deliberately left at
+ * this commit: repairing it moves emitted output across the corpus and belongs
+ * with its own evidence. What this stops is the defect being EXTENDED to a
+ * spelling that did not have it.
+ */
+function firstStackPointerMove(
+  insns: Instruction[],
+  prologue: PrologueFacts,
+  is64: boolean,
+): number | null {
+  const sp = is64 ? "rsp" : "esp";
+  const spCanon = canonReg(sp);
+  const from = prologue.end ?? Number.NEGATIVE_INFINITY;
+  for (const insn of insns) {
+    if (insn.address < from) continue;
+    const mn = insn.mnemonic.toLowerCase();
+    if (SP_MOVING_MNEMONICS.has(mn)) return insn.address;
+    const dest = (insn.opStr.split(",")[0] ?? "").trim().toLowerCase();
+    // A memory destination writes no register; `[rsp + 8]` is a store THROUGH
+    // the stack pointer, not a write OF it.
+    if (dest.includes("[")) continue;
+    if (isKnownRegister(dest) && canonReg(dest) === spCanon) return insn.address;
+  }
+  return null;
+}
+
+/**
  * The frame of one function, or null when there is nothing to say about it.
  *
  * `arch` comes before `is64` because it outranks it: the architecture chooses
@@ -1156,6 +1237,7 @@ export function analyzeStackFrame(
     frameEstablishedAt: geometry.establishedAt,
     prologueEnd: geometry.prologue.end,
     spWritesAt: geometry.prologue.spWritesAt,
+    spMovesAt: firstStackPointerMove(funcInsns, geometry.prologue, is64),
     // `null` where the walk read no prologue extent, so a consumer cannot read
     // "allocates nothing" out of "nothing was read" — `StackFrame`'s own rule.
     prologueAlloc: geometry.prologue.end === null ? null : geometry.prologue.alloc,
