@@ -1649,6 +1649,24 @@ mkdir -p /tmp/pab-wt/NAME/.scratch
 - **Pin a baseline before the agents start** — one `npm run corpus` on the session's base commit,
   under its own label.
 
+**Three conflict classes recur, and two of them produce code that LOOKS merged and is not.** A
+session integrating eight branches hit each of them repeatedly:
+
+- **An appended optional parameter.** Every agent is told to append its new argument last
+  (`naming`, `seh32Scopes`, `userNames`, `frameTap` all did), so two branches append at the same
+  place. Take BOTH, in cherry-pick order, and then fix the three things a textual union breaks: the
+  **`/**` opener of the second docblock is eaten** (the union joins the first parameter's line to
+  the second's ` * …` body — a syntax error, and the only symptom is a wall of TS1005s), the
+  **positional call sites** in `corpus/sweep.ts`, `mcp/tools.ts` and every `pipeline.test.ts`
+  helper need an `undefined` for each slot the caller skips, and an **import line** may be
+  duplicated. `npm run typecheck` catches all three; run it before `cherry-pick --continue`.
+- **`pipeline.test.ts` — never hand-merge it.** It is ~10k lines of independent `describe` blocks,
+  so the sound resolution is mechanical: take main's version, append the blocks the picked commit
+  ADDS, merge the import lines, and **report any `describe` present in both but textually
+  different** rather than silently keeping one. A three-way merge of this file produces plausible
+  garbage (a `describe` spliced into another's body) that typecheck may or may not catch.
+- **`CHANGELOG.md`** is the easy one: two additions under one heading, newest timestamp first.
+
 ## Gates
 
 ```sh
