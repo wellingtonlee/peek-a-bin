@@ -3,7 +3,7 @@
 import "../../test/domSetup";
 import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type DecompileAdmissions, emptyAdmissions } from "../../disasm/decompile/emit";
 import type { DecompileTab } from "../../hooks/decompileTabsState";
 import { ADMISSION_SEPARATOR, admissionSummary } from "../../hooks/decompileTabsState";
@@ -1158,9 +1158,21 @@ describe("DecompileView context menu", () => {
     expect(fireEvent.contextMenu(lineRow(1), { clientX: 1, clientY: 1 })).toBe(false);
   });
 
-  it("refuses on a line with no address, and leaves the browser menu alone", () => {
-    setup({ code: CODE_3, lineMap: MAP_3(), comments: {}, onEditComment: vi.fn() });
-    // Line 2 is absent from the map, so the native default must survive.
+  it("refuses on a line with no address when nothing renameable is under the pointer", () => {
+    setup({
+      code: CODE_3,
+      lineMap: MAP_3(),
+      comments: {},
+      onEditComment: vi.fn(),
+      onRenameVar: vi.fn(),
+    });
+    // Line 2 is absent from the map. The click lands on the `;` — a
+    // punctuation span, not an identifier — so there is no entry to offer and
+    // the native default must survive. (An address-less line WITH a renameable
+    // identifier opens; see "DecompileView variable rename".)
+    expect(fireEvent.contextMenu(tokenSpan(2, ";"), { clientX: 1, clientY: 1 })).toBe(true);
+    expect(ctxMenu()).toBeNull();
+    // The row itself, whose target is the row and not a token, is refused too.
     expect(fireEvent.contextMenu(lineRow(2), { clientX: 1, clientY: 1 })).toBe(true);
     expect(ctxMenu()).toBeNull();
   });
@@ -1643,6 +1655,369 @@ describe("DecompileView inline comments", () => {
   });
 });
 
+/**
+ * FILE-WIDE, deliberately: React caches its "unique key" warning PER OWNER
+ * COMPONENT, so a guard inside one `describe` would see the warning only in
+ * the first test that renders the offending owner and go silently green in
+ * every later one (CLAUDE.md, "Writing a component test has four traps").
+ */
+let keyWarnings: string[] = [];
+beforeEach(() => {
+  keyWarnings = [];
+  const real = console.error;
+  vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+    const text = args.map(String).join(" ");
+    if (text.includes('unique "key"')) keyWarnings.push(text);
+    else real(...args);
+  });
+});
+
 afterEach(() => {
   vi.restoreAllMocks();
+  expect(keyWarnings, "React key warning").toEqual([]);
+});
+
+// ── Variable rename from the panel (peek-a-bin-5b6q.7) ──
+
+/**
+ * A small emitted function: a typedef block above, a header with one
+ * parameter, a declaration block with a local, a register, a capture and an
+ * unrecovered value, then a body. Only the body lines carry addresses, as the
+ * emitter's `lineMap` does.
+ */
+const RENAME_CODE = [
+  "typedef struct struct_0 struct_0;", // 0
+  "", // 1
+  "int sub_401000(int64_t arg_0) {", // 2
+  "    uint32_t var_20;", // 3
+  "    int64_t rax;", // 4
+  "    uint32_t flg_401004_0;", // 5
+  "    intptr_t __unrecovered_1; /* not recovered */", // 6
+  "", // 7
+  "    var_20 = arg_0 + 1;", // 8
+  "    rax = __unrecovered_1;", // 9
+  "    return ((struct_0 *)rax)->field_0x8;", // 10
+  "}", // 11
+].join("\n");
+
+const RENAME_MAP = () =>
+  new Map([
+    [8, 0x401000],
+    [9, 0x401004],
+    [10, 0x401008],
+  ]);
+
+const renameEntry = () => screen.queryByText(/^Rename .*…$/);
+const resetEntry = () => screen.queryByText("Reset name");
+const renameBox = () => screen.queryByTestId("decompile-rename-var") as HTMLInputElement | null;
+
+function renameSetup(overrides: Partial<Props> = {}) {
+  const onRenameVar = vi.fn();
+  const onClearVarRename = vi.fn();
+  const onEditComment = vi.fn();
+  const r = setup({
+    code: RENAME_CODE,
+    lineMap: RENAME_MAP(),
+    comments: {},
+    onEditComment,
+    onCommitComment: vi.fn(),
+    onDeleteComment: vi.fn(),
+    onRenameVar,
+    onClearVarRename,
+    ...overrides,
+  });
+  return { ...r, onRenameVar, onClearVarRename, onEditComment };
+}
+
+/** Right-click one token, returning what `fireEvent` returns (false = default prevented). */
+function rightClick(line: number, text: string): boolean {
+  return fireEvent.contextMenu(tokenSpan(line, text), { clientX: 40, clientY: 80 });
+}
+
+describe("DecompileView variable rename — what the menu offers", () => {
+  it("tags plain identifiers with data-ident and nothing else", () => {
+    renameSetup();
+    expect(tokenSpan(8, "var_20").getAttribute("data-ident")).toBe("var_20");
+    expect(tokenSpan(8, "arg_0").getAttribute("data-ident")).toBe("arg_0");
+    expect(tokenSpan(9, "rax").getAttribute("data-ident")).toBe("rax");
+    // Keywords, types, links and punctuation are not identifiers here.
+    expect(tokenSpan(10, "return").hasAttribute("data-ident")).toBe(false);
+    expect(tokenSpan(3, "uint32_t").hasAttribute("data-ident")).toBe(false);
+    expect(tokenSpan(2, "sub_401000").hasAttribute("data-ident")).toBe(false);
+    expect(tokenSpan(10, "struct_0").hasAttribute("data-ident")).toBe(false);
+    expect(tokenSpan(8, ";").hasAttribute("data-ident")).toBe(false);
+  });
+
+  it("offers 'Rename var_20…' beside the comment entries on a body line", () => {
+    renameSetup();
+    expect(rightClick(8, "var_20")).toBe(false);
+    expect(renameEntry()?.textContent).toBe("Rename var_20…");
+    expect(screen.getByText("Add comment")).toBeTruthy();
+    expect(screen.getByText("Copy address")).toBeTruthy();
+    expect(resetEntry()).toBeNull();
+  });
+
+  it("offers it for a parameter too", () => {
+    renameSetup();
+    rightClick(8, "arg_0");
+    expect(renameEntry()?.textContent).toBe("Rename arg_0…");
+  });
+
+  it("offers NO rename entry on __unrecovered_1, and none on a register token", () => {
+    renameSetup();
+    rightClick(9, "__unrecovered_1");
+    // The line has an address, so the menu opens for the comment entries…
+    expect(screen.getByText("Add comment")).toBeTruthy();
+    // …but nothing is offered for an occurrence-numbered name.
+    expect(renameEntry()).toBeNull();
+    fireEvent.click(document.body);
+    rightClick(9, "rax");
+    expect(screen.getByText("Add comment")).toBeTruthy();
+    expect(renameEntry()).toBeNull();
+  });
+
+  it("offers none on a capture or a struct field either", () => {
+    renameSetup();
+    rightClick(5, "flg_401004_0");
+    expect(renameEntry()).toBeNull();
+    expect(ctxMenu()).toBeNull(); // no address on line 5 and nothing renameable: no menu
+    rightClick(10, "field_0x8");
+    expect(renameEntry()).toBeNull();
+    expect(screen.getByText("Add comment")).toBeTruthy(); // line 10 has an address
+  });
+
+  it("opens on a DECLARATION line — no address — with Copy address and the comment entry ABSENT", () => {
+    renameSetup();
+    expect(rightClick(3, "var_20")).toBe(false);
+    expect(renameEntry()?.textContent).toBe("Rename var_20…");
+    expect(screen.queryByText("Copy address")).toBeNull();
+    expect(screen.queryByText("Add comment")).toBeNull();
+    expect(screen.queryByText("Edit comment")).toBeNull();
+  });
+
+  it("opens on the header's parameter the same way", () => {
+    renameSetup();
+    expect(rightClick(2, "arg_0")).toBe(false);
+    expect(renameEntry()?.textContent).toBe("Rename arg_0…");
+    expect(screen.queryByText("Copy address")).toBeNull();
+  });
+
+  it("leaves the browser menu alone on the typedef line, where nothing is renameable", () => {
+    renameSetup();
+    expect(rightClick(0, "struct_0")).toBe(true);
+    expect(renameEntry()).toBeNull();
+    expect(screen.queryByText("Copy address")).toBeNull();
+  });
+
+  it("offers nothing without an onRenameVar, so a panel mounted without it is unchanged", () => {
+    renameSetup({ onRenameVar: undefined });
+    rightClick(8, "var_20");
+    expect(screen.getByText("Add comment")).toBeTruthy();
+    expect(renameEntry()).toBeNull();
+    fireEvent.click(document.body);
+    // …and a declaration line does not open at all.
+    expect(rightClick(3, "var_20")).toBe(true);
+  });
+
+  it("offers nothing on the AI tab, whose text is not the pipeline's", () => {
+    renameSetup({ activeTab: "ai", syncDisabled: true });
+    expect(rightClick(8, "var_20")).toBe(true);
+    expect(renameEntry()).toBeNull();
+  });
+
+  it("maps a displayed rename back to its original key: the entry names the SHOWN name", () => {
+    // After `var_20` → `count`, the code prints `count`; the entry shows that,
+    // and the commit below goes to the `var_20` key.
+    const code = RENAME_CODE.replace(/var_20/g, "count");
+    renameSetup({ code, varRenames: { var_20: "count" } });
+    rightClick(8, "count");
+    expect(renameEntry()?.textContent).toBe("Rename count…");
+    expect(resetEntry()).toBeTruthy();
+    expect(resetEntry()?.getAttribute("title")).toBe("Back to var_20");
+  });
+
+  it("'Reset name' dispatches the clear under the ORIGINAL key and closes", async () => {
+    const code = RENAME_CODE.replace(/var_20/g, "count");
+    const { user, onClearVarRename, onRenameVar } = renameSetup({
+      code,
+      varRenames: { var_20: "count" },
+    });
+    rightClick(8, "count");
+    await user.click(resetEntry() as HTMLElement);
+    expect(onClearVarRename.mock.calls).toEqual([["var_20"]]);
+    expect(onRenameVar).not.toHaveBeenCalled();
+    expect(ctxMenu()).toBeNull();
+    expect(resetEntry()).toBeNull();
+  });
+
+  it("shows no Reset entry for a token that was never renamed", () => {
+    renameSetup({ varRenames: { arg_0: "ctx" } });
+    rightClick(8, "var_20");
+    expect(renameEntry()).toBeTruthy();
+    expect(resetEntry()).toBeNull();
+  });
+});
+
+describe("DecompileView variable rename — the inline editor", () => {
+  /** Open the menu on `var_20` (line 8) and take the rename entry. */
+  async function openEditor(overrides: Partial<Props> = {}) {
+    const r = renameSetup(overrides);
+    rightClick(8, "var_20");
+    await r.user.click(renameEntry() as HTMLElement);
+    return r;
+  }
+
+  it("mounts a focused input seeded with the displayed name, at the menu position, and closes the menu", async () => {
+    await openEditor();
+    const box = renameBox();
+    expect(box).toBeTruthy();
+    expect(box?.value).toBe("var_20");
+    expect(document.activeElement).toBe(box);
+    expect(renameEntry()).toBeNull();
+    const popup = box?.closest("div[style]") as HTMLElement;
+    expect(popup.style.left).toBe("40px");
+    expect(popup.style.top).toBe("80px");
+  });
+
+  it("Enter commits onRenameVar(key, typed) and closes", async () => {
+    const { onRenameVar, onClearVarRename } = await openEditor();
+    const box = renameBox() as HTMLInputElement;
+    fireEvent.change(box, { target: { value: "count" } });
+    fireEvent.keyDown(box, { key: "Enter" });
+    expect(onRenameVar.mock.calls).toEqual([["var_20", "count"]]);
+    expect(onClearVarRename).not.toHaveBeenCalled();
+    expect(renameBox()).toBeNull();
+  });
+
+  it("trims what was typed", async () => {
+    const { onRenameVar } = await openEditor();
+    const box = renameBox() as HTMLInputElement;
+    fireEvent.change(box, { target: { value: "  count  " } });
+    fireEvent.keyDown(box, { key: "Enter" });
+    expect(onRenameVar.mock.calls).toEqual([["var_20", "count"]]);
+  });
+
+  it("commits under the ORIGINAL key when the token on screen is already a rename", async () => {
+    const code = RENAME_CODE.replace(/var_20/g, "count");
+    const { user, onRenameVar } = renameSetup({ code, varRenames: { var_20: "count" } });
+    rightClick(8, "count");
+    await user.click(renameEntry() as HTMLElement);
+    const box = renameBox() as HTMLInputElement;
+    expect(box.value).toBe("count");
+    fireEvent.change(box, { target: { value: "total" } });
+    fireEvent.keyDown(box, { key: "Enter" });
+    expect(onRenameVar.mock.calls).toEqual([["var_20", "total"]]);
+  });
+
+  it("Enter on an EMPTY box clears the rename instead", async () => {
+    const { onRenameVar, onClearVarRename } = await openEditor();
+    const box = renameBox() as HTMLInputElement;
+    fireEvent.change(box, { target: { value: "   " } });
+    fireEvent.keyDown(box, { key: "Enter" });
+    expect(onClearVarRename.mock.calls).toEqual([["var_20"]]);
+    expect(onRenameVar).not.toHaveBeenCalled();
+    expect(renameBox()).toBeNull();
+  });
+
+  it("Enter on the generated name clears too — typing `var_20` back is a reset", async () => {
+    const code = RENAME_CODE.replace(/var_20/g, "count");
+    const { user, onRenameVar, onClearVarRename } = renameSetup({
+      code,
+      varRenames: { var_20: "count" },
+    });
+    rightClick(8, "count");
+    await user.click(renameEntry() as HTMLElement);
+    const box = renameBox() as HTMLInputElement;
+    fireEvent.change(box, { target: { value: "var_20" } });
+    fireEvent.keyDown(box, { key: "Enter" });
+    expect(onClearVarRename.mock.calls).toEqual([["var_20"]]);
+    expect(onRenameVar).not.toHaveBeenCalled();
+  });
+
+  it("Enter on the unchanged displayed name dispatches nothing", async () => {
+    const code = RENAME_CODE.replace(/var_20/g, "count");
+    const { user, onRenameVar, onClearVarRename } = renameSetup({
+      code,
+      varRenames: { var_20: "count" },
+    });
+    rightClick(8, "count");
+    await user.click(renameEntry() as HTMLElement);
+    fireEvent.keyDown(renameBox() as HTMLInputElement, { key: "Enter" });
+    expect(onRenameVar).not.toHaveBeenCalled();
+    expect(onClearVarRename).not.toHaveBeenCalled();
+    expect(renameBox()).toBeNull();
+  });
+
+  it.each([
+    ["a register", "rax"],
+    ["a declared name", "arg_0"],
+    ["a type", "int"],
+    ["a keyword", "return"],
+    ["a generated spelling", "var_8"],
+    ["the unrecovered name", "__unrecovered_1"],
+    ["a non-identifier", "my count"],
+  ])("refuses %s, keeps the box open and says why", async (_label, value) => {
+    const { onRenameVar } = await openEditor();
+    const box = renameBox() as HTMLInputElement;
+    fireEvent.change(box, { target: { value } });
+    fireEvent.keyDown(box, { key: "Enter" });
+    expect(onRenameVar).not.toHaveBeenCalled();
+    expect(renameBox()).toBeTruthy();
+    expect(box.getAttribute("aria-invalid")).toBe("true");
+    expect(screen.getByRole("alert").textContent).toMatch(/identifier|reserved|declared/);
+    // The next keystroke clears the reason.
+    fireEvent.change(box, { target: { value: "count" } });
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("does not read the token's OWN name as a collision when renaming a renamed variable", async () => {
+    // `count` is declared (it is the renamed `var_20`); renaming it to `count2`
+    // must consult the declared set WITHOUT `count`, or a declared-set check
+    // would be right for the wrong reason. Asserted through the accept path.
+    const code = RENAME_CODE.replace(/var_20/g, "count");
+    const { user, onRenameVar } = renameSetup({ code, varRenames: { var_20: "count" } });
+    rightClick(8, "count");
+    await user.click(renameEntry() as HTMLElement);
+    const box = renameBox() as HTMLInputElement;
+    fireEvent.change(box, { target: { value: "count2" } });
+    fireEvent.keyDown(box, { key: "Enter" });
+    expect(onRenameVar.mock.calls).toEqual([["var_20", "count2"]]);
+  });
+
+  it("abandons on Escape without dispatching", async () => {
+    const { onRenameVar, onClearVarRename } = await openEditor();
+    const box = renameBox() as HTMLInputElement;
+    fireEvent.change(box, { target: { value: "count" } });
+    fireEvent.keyDown(box, { key: "Escape" });
+    expect(renameBox()).toBeNull();
+    expect(onRenameVar).not.toHaveBeenCalled();
+    expect(onClearVarRename).not.toHaveBeenCalled();
+  });
+
+  it("abandons on blur", async () => {
+    const { onRenameVar } = await openEditor();
+    fireEvent.blur(renameBox() as HTMLInputElement);
+    expect(renameBox()).toBeNull();
+    expect(onRenameVar).not.toHaveBeenCalled();
+  });
+
+  it("stops its keystrokes from reaching the app's global bindings", async () => {
+    // The app's keydown handler (`AddressBar`, `useDisassemblyKeyboard`) lives
+    // on `window`; a `d` typed into the box must not toggle the panel it sits
+    // in. Asserted at `window` because React's root listener is where the
+    // synthetic `stopPropagation` takes effect — an ancestor BELOW the root
+    // container sees the native event first and cannot be stopped from here.
+    const winKeyDown = vi.fn();
+    window.addEventListener("keydown", winKeyDown);
+    try {
+      await openEditor();
+      fireEvent.keyDown(renameBox() as HTMLInputElement, { key: "d" });
+      expect(winKeyDown).not.toHaveBeenCalled();
+      // The control: the same key on the code pane does reach the window.
+      fireEvent.keyDown(codePane(), { key: "d" });
+      expect(winKeyDown).toHaveBeenCalledTimes(1);
+    } finally {
+      window.removeEventListener("keydown", winKeyDown);
+    }
+  });
 });

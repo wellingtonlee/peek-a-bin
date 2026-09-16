@@ -11,6 +11,12 @@ import { useDismissOnOutsideClick } from "../hooks/useDismissOnOutsideClick";
 import type { SectionHeader } from "../pe/types";
 import { copyText } from "../utils/clipboard";
 import { type AddressKind, classifyAddress } from "./classifyAddress";
+import {
+  declaredNamesOf,
+  identKeyFor,
+  renameableIdentClass,
+  validateVarName,
+} from "./decompileIdent";
 import { focusOnMount } from "./focusOnMount";
 
 // ── Syntax Highlighting ──
@@ -23,8 +29,13 @@ interface Token {
    * it can only SAY a token is a hex number; whether that number is an address
    * a reader can be sent to is decided in the `lines` memo, which has the
    * section table, and recorded in `link`.
+   *
+   * `"ident"` for a plain identifier — not a keyword, a type, a `sub_`/`loc_`/
+   * `struct_` link or `__asm`. Rendered with `data-ident` so a right-click can
+   * ask what was under the pointer; whether it is RENAMEABLE is decided at the
+   * click by `renameableIdentClass`, not here (peek-a-bin-5b6q.7).
    */
-  kind?: "hex";
+  kind?: "hex" | "ident";
   /** Set at render time on a hex literal that lands inside a section. */
   link?: AddressKind;
 }
@@ -110,7 +121,7 @@ function tokenizeLine(line: string): Token[] {
       } else if (text === "__asm") {
         tokens.push({ text, cls: "dc-comment italic" });
       } else {
-        tokens.push({ text, cls: "" });
+        tokens.push({ text, cls: "", kind: "ident" });
       }
     } else if (m[8]) {
       // Whitespace
@@ -137,7 +148,29 @@ interface CtxMenuState {
   x: number;
   y: number;
   lineNum: number;
-  address: number;
+  /**
+   * The line's instruction address, or undefined on a line the map does not
+   * cover (a typedef, a declaration). The comment and Copy-address entries
+   * need one; the rename entry does not, which is why the menu opens without.
+   */
+  address?: number;
+  /**
+   * The rename target under the pointer: the identifier as DISPLAYED and the
+   * annotation KEY it maps back to (`identKeyFor`). Set only when the key is a
+   * stable class and a rename callback exists.
+   */
+  rename?: { displayed: string; key: string };
+}
+
+/** The inline rename editor, mounted at the menu's position. */
+interface RenameVarState {
+  x: number;
+  y: number;
+  key: string;
+  displayed: string;
+  value: string;
+  /** `validateVarName`'s refusal for the current value, shown under the box. */
+  problem: string | null;
 }
 
 // ── Component ──
@@ -198,6 +231,17 @@ interface DecompileViewProps {
   onEditComment?: (ec: { address: number; value: string } | null) => void;
   onCommitComment?: (address: number, text: string) => void;
   onDeleteComment?: (address: number) => void;
+  /**
+   * THIS function's variable renames, `generated name → new name`
+   * (`state.varRenames[funcAddr]`), for the reverse lookup a right-click on a
+   * renamed token needs and for the "Reset name" entry. The names themselves
+   * are already in `code`: the pipeline applied them (peek-a-bin-5b6q.7).
+   */
+  varRenames?: Readonly<Record<string, string>>;
+  /** `(generated name, new name)` — the menu's "Rename …" commit. Absent: no rename entry. */
+  onRenameVar?: (name: string, newName: string) => void;
+  /** `(generated name)` — "Reset name", and an Enter on an empty or unchanged box. */
+  onClearVarRename?: (name: string) => void;
 }
 
 export function DecompileView({
@@ -230,10 +274,22 @@ export function DecompileView({
   onEditComment,
   onCommitComment,
   onDeleteComment,
+  varRenames,
+  onRenameVar,
+  onClearVarRename,
 }: DecompileViewProps) {
   const preRef = useRef<HTMLPreElement>(null);
   const ctxMenuRef = useRef<HTMLDivElement>(null);
   const [ctxMenu, setCtxMenu] = useState<CtxMenuState | null>(null);
+  const [renameVar, setRenameVar] = useState<RenameVarState | null>(null);
+
+  /**
+   * Every name the C on screen already binds, read off its declaration lines
+   * (`declaredNamesOf`), so a rename that would collide is refused with a
+   * reason before it is dispatched — the same `validateVarName` the pipeline's
+   * `applyUserNames` applies to what it is handed.
+   */
+  const declaredNames = useMemo(() => declaredNamesOf(code), [code]);
 
   /**
    * Whether the image was supplied, so a constant CAN be classified. All three
@@ -471,14 +527,60 @@ export function DecompileView({
 
   const handleContextMenu = useCallback(
     (e: React.MouseEvent, lineNum: number) => {
-      if (syncDisabled || !lineMap) return;
-      const addr = lineMap.get(lineNum);
-      if (addr === undefined) return;
+      // The AI tab's text is not the pipeline's: its line map numbers another
+      // body and its identifiers may be its own inventions, so neither a
+      // comment nor a rename can be attributed from it.
+      if (syncDisabled) return;
+      const addr = lineMap?.get(lineNum);
+      // What was under the pointer, if an identifier: the KEY is the generated
+      // name the token maps back to, and only a stable class is offered — a
+      // register, an `__unrecovered_N` or a `field_` gets no entry, whatever
+      // line it sits on (`renameableIdentClass`).
+      const displayed = (e.target as HTMLElement).dataset?.ident;
+      const key = displayed !== undefined ? identKeyFor(displayed, varRenames) : undefined;
+      const rename =
+        displayed !== undefined && key !== undefined && onRenameVar && renameableIdentClass(key)
+          ? { displayed, key }
+          : undefined;
+      // A line with no address and nothing renameable under the pointer has
+      // no entry to show, so the browser's own menu is left alone. A typedef
+      // or declaration line WITH a renameable identifier opens — that is the
+      // case that used to be unreachable when the address was the gate.
+      if (addr === undefined && !rename) return;
       e.preventDefault();
-      setCtxMenu({ x: e.clientX, y: e.clientY, lineNum, address: addr });
+      setCtxMenu({ x: e.clientX, y: e.clientY, lineNum, address: addr, rename });
     },
-    [syncDisabled, lineMap],
+    [syncDisabled, lineMap, varRenames, onRenameVar],
   );
+
+  /** Commit the rename box: empty or unchanged clears, anything else renames. */
+  const commitRenameVar = useCallback(() => {
+    if (!renameVar) return;
+    const value = renameVar.value.trim();
+    if (value === "" || value === renameVar.key) {
+      // Back to the generated name. A clear of a name that was never renamed is
+      // the reducer's same-reference no-op.
+      onClearVarRename?.(renameVar.key);
+      setRenameVar(null);
+      return;
+    }
+    if (value === renameVar.displayed) {
+      setRenameVar(null);
+      return;
+    }
+    // Asked without the token's own current spelling, or renaming `count`
+    // back to `count` — or to a fresh name while `count` is declared — would
+    // read as a collision with itself.
+    const others = new Set(declaredNames);
+    others.delete(renameVar.displayed);
+    const problem = validateVarName(value, others);
+    if (problem) {
+      setRenameVar({ ...renameVar, problem });
+      return;
+    }
+    onRenameVar?.(renameVar.key, value);
+    setRenameVar(null);
+  }, [renameVar, declaredNames, onRenameVar, onClearVarRename]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -732,6 +834,16 @@ export function DecompileView({
                   </span>
                   <span className="flex-1">
                     {line.tokens.map((tok, i) => {
+                      // A plain identifier carries `data-ident` and nothing
+                      // else, so the context menu can read what was under the
+                      // pointer; whitespace and punctuation stay bare spans.
+                      if (tok.kind === "ident") {
+                        return (
+                          <span key={i} data-ident={tok.text}>
+                            {tok.text}
+                          </span>
+                        );
+                      }
                       if (!tok.cls) return <span key={i}>{tok.text}</span>;
                       // A `sub_` token's hover is asked at RENDER, not in the
                       // `lines` memo: `subTitle` is a fresh closure every parent
@@ -785,36 +897,118 @@ export function DecompileView({
         </pre>
       )}
 
-      {/* Context menu */}
-      {ctxMenu && onEditComment && comments && (
+      {/* Context menu. The comment and Copy-address entries need the line's
+          address; the rename entries need an identifier under the pointer.
+          Either alone is enough to open it (`handleContextMenu`). */}
+      {ctxMenu && (
         <div
           ref={ctxMenuRef}
           className="fixed z-50 backdrop-blur-sm bg-gray-900/95 border border-gray-700 rounded-lg shadow-xl py-1 text-xs min-w-[180px]"
           style={{ left: ctxMenu.x, top: ctxMenu.y }}
         >
-          <button
-            type="button"
-            onClick={() => {
-              const existing = comments[ctxMenu.address];
-              onEditComment({ address: ctxMenu.address, value: existing ?? "" });
-              setCtxMenu(null);
-            }}
-            className="w-full text-left px-3 py-1.5 hover:bg-gray-700/80 text-gray-200 flex items-center justify-between"
-          >
-            <span>{comments[ctxMenu.address] ? "Edit comment" : "Add comment"}</span>
-            <span className="text-gray-500 text-[9px] ml-4">;</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              const hex = ctxMenu.address.toString(16).toUpperCase();
-              void copyText(hex);
-              setCtxMenu(null);
-            }}
-            className="w-full text-left px-3 py-1.5 hover:bg-gray-700/80 text-gray-200"
-          >
-            Copy address
-          </button>
+          {ctxMenu.address !== undefined && onEditComment && comments && (
+            <button
+              type="button"
+              onClick={() => {
+                const address = ctxMenu.address as number;
+                const existing = comments[address];
+                onEditComment({ address, value: existing ?? "" });
+                setCtxMenu(null);
+              }}
+              className="w-full text-left px-3 py-1.5 hover:bg-gray-700/80 text-gray-200 flex items-center justify-between"
+            >
+              <span>{comments[ctxMenu.address] ? "Edit comment" : "Add comment"}</span>
+              <span className="text-gray-500 text-[9px] ml-4">;</span>
+            </button>
+          )}
+          {ctxMenu.address !== undefined && (
+            <button
+              type="button"
+              onClick={() => {
+                const hex = (ctxMenu.address as number).toString(16).toUpperCase();
+                void copyText(hex);
+                setCtxMenu(null);
+              }}
+              className="w-full text-left px-3 py-1.5 hover:bg-gray-700/80 text-gray-200"
+            >
+              Copy address
+            </button>
+          )}
+          {ctxMenu.rename && (
+            <button
+              type="button"
+              onClick={() => {
+                const { key, displayed } = ctxMenu.rename as { key: string; displayed: string };
+                setRenameVar({
+                  x: ctxMenu.x,
+                  y: ctxMenu.y,
+                  key,
+                  displayed,
+                  value: displayed,
+                  problem: null,
+                });
+                setCtxMenu(null);
+              }}
+              className="w-full text-left px-3 py-1.5 hover:bg-gray-700/80 text-gray-200"
+            >
+              Rename {ctxMenu.rename.displayed}…
+            </button>
+          )}
+          {ctxMenu.rename && varRenames?.[ctxMenu.rename.key] !== undefined && onClearVarRename && (
+            <button
+              type="button"
+              onClick={() => {
+                onClearVarRename((ctxMenu.rename as { key: string }).key);
+                setCtxMenu(null);
+              }}
+              className="w-full text-left px-3 py-1.5 hover:bg-gray-700/80 text-gray-200"
+              title={`Back to ${ctxMenu.rename.key}`}
+            >
+              Reset name
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Inline variable rename, at the menu's position. Enter commits (empty
+          or the generated name clears), Escape and blur abandon; a refused
+          name stays in the box with the reason under it. The `DisassemblyRows`
+          label-rename pattern, with `focusOnMount` rather than autoFocus. */}
+      {renameVar && (
+        <div
+          className="fixed z-50 backdrop-blur-sm bg-gray-900/95 border border-gray-700 rounded-lg shadow-xl p-2 text-xs"
+          style={{ left: renameVar.x, top: renameVar.y }}
+        >
+          <label className="flex items-center gap-2">
+            <span className="text-gray-400 select-none">{renameVar.key} →</span>
+            <input
+              ref={focusOnMount}
+              data-testid="decompile-rename-var"
+              aria-label={`New name for ${renameVar.key}`}
+              aria-invalid={renameVar.problem !== null}
+              className={`bg-gray-800 border rounded px-1 text-yellow-300 text-[11px] font-mono outline-none w-48 ${
+                renameVar.problem ? "border-red-500" : "border-blue-500"
+              }`}
+              value={renameVar.value}
+              onChange={(e) => setRenameVar({ ...renameVar, value: e.target.value, problem: null })}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  commitRenameVar();
+                } else if (e.key === "Escape") {
+                  e.preventDefault();
+                  setRenameVar(null);
+                }
+                e.stopPropagation();
+              }}
+              onBlur={() => setRenameVar(null)}
+            />
+          </label>
+          {renameVar.problem && (
+            <div className="mt-1 text-[10px] text-red-400" role="alert">
+              {renameVar.problem}
+            </div>
+          )}
         </div>
       )}
     </div>

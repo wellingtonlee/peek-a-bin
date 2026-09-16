@@ -1568,6 +1568,29 @@ export function DisassemblyView() {
                   dispatch({ type: "SET_COMMENT", address: addr, text })
                 }
                 onDeleteComment={(addr) => dispatch({ type: "DELETE_COMMENT", address: addr })}
+                // This function's variable renames; the pipeline has already
+                // applied them to `code` (`applyUserNames`), so the panel needs
+                // the record only for the reverse lookup and the Reset entry.
+                varRenames={currentFunc ? state.varRenames[currentFunc.address] : undefined}
+                onRenameVar={(name, newName) => {
+                  if (currentFunc) {
+                    dispatch({
+                      type: "RENAME_VARIABLE",
+                      funcAddr: currentFunc.address,
+                      name,
+                      newName,
+                    });
+                  }
+                }}
+                onClearVarRename={(name) => {
+                  if (currentFunc) {
+                    dispatch({
+                      type: "CLEAR_VARIABLE_RENAME",
+                      funcAddr: currentFunc.address,
+                      name,
+                    });
+                  }
+                }}
               />
             </div>
           </>

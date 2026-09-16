@@ -163,6 +163,18 @@ the union, handle it in the `appReducer` switch. **Counts drift — re-measure r
 number, and count the union by unique `type: "…"` string, not by `| {` lines** (six members span
 several lines, which has produced a 6-short re-measurement twice).
 
+**`AppState.varRenames: Record<funcAddr, Record<orig, new>>` is the fourth annotation** — the
+user's variable names, keyed by the generated name the pipeline PRINTED (`var_20`, `arg_1`,
+`hFile`), applied in the decompiler pipeline and never by text substitution (see the decompile
+panel bullet under **Rendering**). Actions `RENAME_VARIABLE {funcAddr, name, newName}` and
+`CLEAR_VARIABLE_RENAME {funcAddr, name}`, both `pushUndo`; both REPLACE the outer and the inner
+record; CLEAR drops the function's key with its last entry and **returns `state` itself on an
+absent key**. `LOAD_PERSISTED` / `IMPORT_ANNOTATIONS` / `IMPORT_FULL_ANALYSIS` carry it as a
+**required** field, so a loader that forgets it fails to compile rather than dropping every
+rename on load; the imports merge per function (`mergeVarRenames`), an empty import being the
+identity — which is what keeps an MCP sync frame (the bridge has no slot for it) from wiping
+local renames. 40 action types at this writing, by the unique-`type:` count.
+
 `appReducer` is covered branch-by-branch in `src/hooks/__tests__/appReducer.test.ts`. **Two
 invariants that suite pins**: a no-op branch returns the **same object reference**, and every
 mutating action **replaces** rather than mutates (annotation undo/redo snapshots hold direct
@@ -233,8 +245,11 @@ x86/x64 take recursive descent + gap fill, ARM64 the fixed-width sweep.
 **not decompile**) and mints the instruction-array tokens the worker's derived caches key on
 (`insnsTokens`; **the counter never resets, so a token cannot be reused across files**). **The one
 decompile cache is `useDecompileTabs`' `lowCache`, content-keyed by `decompileInputsKey` (all
-renames) in `decompileTabsState.ts` — derived at read time like `decompileServerKey`, so there is no
-invalidation call to remember.** The client's address-keyed copy, with an `invalidateDecompileCache()`
+function renames, plus THIS function's `varRenames`, order-independent) in `decompileTabsState.ts`
+— derived at read time like `decompileServerKey`, so there is no invalidation call to remember.**
+The hook re-runs `decompileLow` when this function's `varRenames` record changes under a loaded
+Low Level tab (identity compare — the reducer replaces the record), and not on a navigation,
+which is `DisassemblyView`'s reset-and-trigger. The client's address-keyed copy, with an `invalidateDecompileCache()`
 nothing called, was deleted: a rename changed the request and not the address, so it served
 pre-rename C for the session. The `resetStructRegistry` RPC stays. The pipeline's own header name
 comes from `funcMap` — the same map the callee names come from — so a rename reaches the header and
@@ -464,7 +479,27 @@ variable on the app root.
   `loc_` follow uses. **A `struct_N` token follows to its typedef the same way** (`structLines`,
   `/^struct (struct_\w+) \{/` over the rendered text, first occurrence wins, above the `onNavigate`
   guard like `loc_`); **struct/field RENAMES ARE REFUSED** — `struct_N` is a `nextId++` reset per
-  file, so a name persisted under it lands on a different struct next session. **Copy carries the
+  file, so a name persisted under it lands on a different struct next session. **A VARIABLE is
+  renamed from the panel's context menu, and the rename is applied IN THE PIPELINE, not at render**
+  (`applyUserNames` in `promote.ts`, after `synthesizeStructs` and after the type-based renaming
+  so the key is the name the user saw; `decompileFunction`'s trailing `userNames`, sent by
+  `disasmClient` only when non-empty). So `lineMap` is exact by construction and Copy, MCP and the
+  AI input carry the names for free. **STABLE KEYS ONLY** — `renameableIdentClass` in
+  `disasm/decompile/userNames.ts` admits `var_<HEX>[_<base>]`, `arg_<N>`/`arg_0x<OFF>`/`arg_ecx`/
+  `arg_edx` and the `TYPE_BASED_NAMES` values (`hFile2`…); REFUSED as keys, each for a different
+  instability: `field_0x`/`struct_N` (decompile-order ids), `__unrecovered_N` (occurrence-ordered),
+  `flg_*`/`clobbered_*`/`<reg>_N` (minted per run), register spellings, `g_<HEX>`/`__imp_`/
+  `__security_cookie` (image-wide externs). **`validateVarName` is the ONE rule for the TARGET**,
+  read by `applyUserNames` (skip) and by the panel (refuse with the reason): identifier syntax, no
+  reserved spelling/register/keyword/type, no collision with a declared name — the panel reads
+  those off the declaration lines (`declaredNamesOf`), the pipeline off the IR. **The on-screen
+  token is the NEW name; the key is the original** (`identKeyFor`, a reverse lookup), which is how
+  a renamed `count` still offers "Rename count…" and "Reset name". `tokenizeLine` tags plain
+  identifiers `kind: "ident"` → `data-ident`; the menu opens when the line has an address OR a
+  renameable identifier is under the pointer, so declaration and header lines are menu-able with
+  the comment/Copy-address entries absent. **No keyboard shortcut** (`N` is the function rename
+  and the panel has no identifier cursor). **RETYPE IS DEFERRED**: a free-text type feeds
+  `_declaredVarTypes`/`emitsAsPointer`; if ever, a picklist of the emitter's own spellings. **Copy carries the
   comments as ` // <first line>` trailers** through `codeWithComments` in `decompileTabsState.ts`,
   which owns `formatComment` too — ONE declaration for screen and clipboard; the string is built
   before `copyText` is called; Shift-click copies raw (title `Copy (Shift: without comments)`); on
@@ -540,8 +575,12 @@ jsdom's unstubbed `window.confirm` returns `undefined`, so an unspied row silent
 nothing listens for is silent**, so the command palette may only name events from `PALETTE_EVENTS`.
 Adding a palette entry is not a reason to add an event.
 
-**Annotations**: bookmarks, renames and comments auto-persist to localStorage per file; undo/redo
-via a snapshot stack.
+**Annotations**: bookmarks, renames, comments and variable renames (`varRenames`) auto-persist to
+localStorage per build; undo/redo via a snapshot stack. `AnnotationPayload.varRenames` validates
+to `{}` when absent (`validateVarRenames`: outer key coerced like `validateAddressMap`, inner a
+string→string record); `ExportSchemaV1.varRenames?` is OPTIONAL with **no version bump** (the
+`functions?` precedent), written only when non-empty. MCP `import_analysis` has no slot for it and
+says so in `docs/mcp-server.md`.
 
 ### Tests
 

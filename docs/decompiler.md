@@ -409,6 +409,35 @@ Level tabs wherever the text still carries the spelling.
   cache-key change and UI for a rename that dies on reload — a half-feature. The real epic is a
   stable struct identity (the fingerprint is not one; `mergeFields` grows it), a registry-level
   name table, persistence, MCP and collision rules.
+- **A variable is renamed from the context menu (peek-a-bin-5b6q.7)** — right-click `var_20`,
+  `arg_1` or `hFile` anywhere it appears (a body line, its declaration, the header) and take
+  "Rename var_20…"; an inline box opens at the pointer, Enter commits, Escape or a click away
+  abandons, an empty box or the generated name resets. "Reset name" appears beside it once a
+  rename exists. **What you see is the pipeline's output**: the rename is applied in
+  `decompileFunction` (`applyUserNames`, `promote.ts`) before emission, so every line, the Copy
+  button, the AI tab's input and the MCP `decompile_function` reply (when a client passes names —
+  the server has no store for them) carry the new name, and `lineMap` is exact because no line
+  count changes. Renames are per function, persist with the other annotations under the build
+  key, export and import with the analysis file (`varRenames`, optional, no schema bump), and
+  undo/redo with Ctrl+Z as one unit with bookmarks and comments.
+  **Which identifiers can be renamed, and why only those.** The key stored is the generated name,
+  so it has to mean the same thing next session: `var_<HEX>` is a slot offset, `arg_<N>` an
+  argument position, `hFile`/`status`/`hr`/`pBuffer`/`bResult` (with a `2`, `3` suffix) a type
+  the same slot will infer again. Refused, each for a different instability: `field_0x`/`struct_N`
+  (the struct id is a `nextId++` in decompile order), `__unrecovered_N` (numbered by occurrence),
+  `flg_*`/`clobbered_*`/`ecx_3` (minted per run by the lifter and SSA destruction), register names
+  (declared as variables since n9cl.4, but they are register spellings printed through several
+  aliases), `g_<HEX>`/`__imp_*`/`__security_cookie` (externs named for the image). A right-click
+  on one of those shows no rename entry. **What you may type** is `validateVarName`'s rule, one
+  declaration in `disasm/decompile/userNames.ts` read by the panel (which shows the reason under
+  the box) and by the pipeline (which silently skips an entry a file brought in that breaks it): a
+  C identifier that is not a reserved spelling, register, keyword or type, and not a name the
+  function already declares — the panel reads those off the declaration lines on screen. A
+  renamed token maps back to its key by reverse lookup (`identKeyFor`), so "Rename count…" on a
+  renamed `var_20` stores under `var_20`. **Retyping a variable is deferred**: a free-text type
+  would feed `_declaredVarTypes` and `emitsAsPointer` and change the arithmetic on lines the user
+  did not touch; if it ever lands it is a picklist of the emitter's own spellings. No keyboard
+  shortcut — `N` is the function rename, and the panel has no identifier cursor.
 - **`sub_<HEX>` navigates** — `onNavigate(addr)`, which `DisassemblyView` wires to `SET_ADDRESS`.
   **Hovering one shows the recovered signature** (`fastcall, 2 params`): the `subTitle(addr)` prop,
   answered by `DisassemblyView` from `funcMap.get(addr)` through the same cached `getSigForFunc`
