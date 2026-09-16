@@ -43,6 +43,7 @@ import { type CrtIdiom, recogniseCrtIdioms } from "./crtIdioms";
 import { canonReg, isKnownRegister } from "./decompile/ir";
 import { buildFuncInsnMap, type FuncExtent } from "./funcInsns";
 import { type PfnPrepass, recognisePfnGlobals } from "./pfnGlobals";
+import { calleeCleanupSignatures, type FunctionSignature } from "./signatures";
 import type { Instruction } from "./types";
 
 // The branch-target grammar used to live here and every importer still reads
@@ -100,6 +101,20 @@ export interface CalleeClobbers {
    * `idioms` is: a caller that never built one gets `g_` for every slot.
    */
   pfn?: PfnPrepass;
+  /**
+   * The callees whose own body states their arity exactly — an x86 `ret N`,
+   * from `signatures.ts`'s {@link calleeCleanupSignatures}. The third per-callee
+   * fact on this channel, and it rides here for the same three reasons the
+   * other two do: same pass, same `funcInsnMap`, same consumer (a `call` in the
+   * lifter), so the browser, `mcp/session.ts` and `corpus/sweep.ts` cap the
+   * call-site push walk from one reading.
+   *
+   * **x86 ONLY, and the x64 ceiling is REFUSED** — `inferSignature64`'s count is
+   * a LOWER bound, so capping on it would delete arguments the machine passes.
+   * See `calleeCleanupSignatures`. Optional for the reason `idioms` is: a caller
+   * that never built one gets exactly the uncapped backwards push walk.
+   */
+  signatures?: ReadonlyMap<number, FunctionSignature>;
 }
 
 // ── Which registers one instruction writes ─────────────────────────────────
@@ -638,6 +653,10 @@ export class CallSummaryCache {
       unresolved: [],
       idioms: recogniseCrtIdioms(funcInsnMap, is64),
       pfn: recognisePfnGlobals({ instructions, funcExtents, iatMap, stringMap, is64 }),
+      // x86 only, and empty rather than absent on x64: the `ret N` ceiling is
+      // the one exact arity statement an x86 body makes about itself, and the
+      // x64 register scan is a lower bound that must never become a cap.
+      signatures: is64 ? undefined : calleeCleanupSignatures(funcInsnMap),
     };
     this.entry = { token, is64, stringMap, clobbers };
     return clobbers;

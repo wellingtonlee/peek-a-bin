@@ -1404,6 +1404,29 @@ refused. **Read the long-form entry before changing the code it describes.**
   operand. **Never answer this from `apitypes.ts`** — that blinds the only arity oracle here.
 - **`collectArgs32`'s backwards push-walk stops at a call whose result feeds a following call**, and
   the marker is `push eax` **after** the call. Deliberately an **admitted under-count**.
+- **A callee's own x86 `ret N` is a CEILING on the call site, and the cap is ONLY-REDUCE.** `ret N`
+  is the one exact arity statement an x86 body makes about itself, so a walk that collected more
+  than `N / 4` has left the argument list; truncation drops the FAR end (the walk runs backwards, so
+  index 0 is argument 1) and can never add one, which is what keeps it incapable of the OVER verdict
+  `corpus/arity.ts` gates at 0. `calleeCleanupSignatures` (`signatures.ts`) is the one declaration —
+  `inferSignature32`'s **first arm and only that arm**, since `framedParamCount` and
+  `registerConvention32` are LOWER bounds by their own docstrings. It rides on
+  `CalleeClobbers.signatures`, the **third** per-callee fact on that channel (beside `idioms` and
+  `pfn`): same whole-image pass, same `funcInsnMap`, same `needInstructions` protocol. A direct
+  target only — an `indirectMem` names the SLOT. **THE x64 CEILING IS REFUSED**: `inferSignature64`
+  counts fastcall registers read before written in the first 20 instructions, so it is a lower bound
+  capped at 4, and capping on it would delete real arguments and then their set-up as dead —
+  `peek-a-bin-qb2x`'s vanished exit code. The map is empty on x64 by construction.
+- **…and THE LAST INSTRUCTION OF A DETECTED EXTENT IS NOT THE EPILOGUE**, so `calleeStackCleanup`
+  now demands **unanimity**: every `ret`/`retn` in the extent must pop the same bytes, and a bare one
+  disagreeing refuses the whole function. A detected extent routinely swallows an MSVC funclet or a
+  neighbouring thunk whose `ret N` then reads as the function's own. t32 `sub_404360` ends its body
+  `ret` at 0x4043EF, the extent runs to 0x404452 and its last instruction is an `__except` filter's
+  `ret 0x4`; every call site does `add esp, 0xc` — THREE cdecl arguments. Uncapped that is a false
+  panel label; as a **ceiling** it deleted two real arguments at three call sites per x86 binary,
+  invisible to gcc, to `corpus/arity.ts` (the callee is a `sub_`) and to `distinct callees lost`.
+  One declaration, so the panel stops claiming it too (`signatures produced` 199→197 / 194→192 — a
+  **refusal replacing a false claim**, all four sites hand-read).
 - **A `push` of a callee-saved register the function has not yet written is a register SAVE** — and
   that, not the register and not the position, is the discriminator. Two rules refuted by this
   corpus: "a push of ebx/esi/edi is a save", and "a save has a matching `pop` before the `ret`".

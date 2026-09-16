@@ -16,6 +16,7 @@ import { buildIATLookup } from "../disasm/operands";
 import { recognisePfnGlobals } from "../disasm/pfnGlobals";
 import { jumpTableTargets } from "../disasm/seeds";
 import { type Seh32ScopeTable, seh32ScopeTableOfFunction } from "../disasm/seh32";
+import { calleeCleanupSignatures } from "../disasm/signatures";
 import type { DisasmFunction, Instruction, Xref } from "../disasm/types";
 import { extractStrings, parsePE } from "../pe/parser";
 import { dataSectionRanges, dataSectionTable, findCodeSection } from "../pe/sections";
@@ -354,6 +355,11 @@ export class FileSession {
       unresolved: [],
       idioms: funcInsnMap ? recogniseCrtIdioms(funcInsnMap, is64) : undefined,
       pfn,
+      // The x86 `ret N` call-site ceiling, from the same map, for the reason
+      // the idioms ride here: one reading of the image, shared by the browser,
+      // this session and `corpus/sweep.ts`. Absent on x64 — that ceiling is
+      // REFUSED, see `calleeCleanupSignatures` (peek-a-bin-s1f6.2).
+      signatures: funcInsnMap && !is64 ? calleeCleanupSignatures(funcInsnMap) : undefined,
     };
 
     // 8d. The naming evidence for the emitter — see `decompile/naming.ts`.

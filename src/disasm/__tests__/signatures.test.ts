@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatSignature, inferSignature } from "../signatures";
+import { calleeCleanupSignatures, formatSignature, inferSignature } from "../signatures";
 import { analyzeStackFrame } from "../stack";
 import type { DisasmFunction, Instruction } from "../types";
 
@@ -928,5 +928,136 @@ describe("formatSignature", () => {
 
   it("uses the singular for exactly one", () => {
     expect(formatSignature({ convention: "thiscall", paramCount: 1 })).toBe("thiscall, 1 param");
+  });
+});
+
+/**
+ * THE CEILING MAP THE LIFTER CAPS CALL SITES ON (peek-a-bin-s1f6.2).
+ *
+ * `calleeCleanupSignatures` is `inferSignature32`'s FIRST arm and only that
+ * arm. The three assertions below are the three refusals that make it a
+ * ceiling rather than a guess: a bare `ret` is absent, a framed function with
+ * no cleanup is absent, and a register convention on its own is absent. Each of
+ * those IS an answer `inferSignature` gives, and each is a LOWER bound.
+ */
+describe("calleeCleanupSignatures", () => {
+  const at = (rows: [string, string][]): Instruction[] =>
+    rows.map(([mnemonic, opStr], i) => ({
+      address: 0x401000 + i * 4,
+      mnemonic,
+      opStr,
+      size: 4,
+      bytes: new Uint8Array(4),
+    }));
+
+  it("reads `ret N` as N / 4 stdcall parameters", () => {
+    const m = calleeCleanupSignatures(
+      new Map([
+        [
+          0x401000,
+          at([
+            ["mov", "eax, dword ptr [ebp + 8]"],
+            ["ret", "0xc"],
+          ]),
+        ],
+      ]),
+    );
+    expect(m.get(0x401000)).toEqual({ convention: "stdcall", paramCount: 3 });
+  });
+
+  it("omits a function that ends in a bare `ret`", () => {
+    const m = calleeCleanupSignatures(
+      new Map([
+        [
+          0x401000,
+          at([
+            ["push", "ebp"],
+            ["mov", "ebp, esp"],
+            ["mov", "eax, dword ptr [ebp + 8]"],
+            ["pop", "ebp"],
+            ["ret", ""],
+          ]),
+        ],
+      ]),
+    );
+    // `inferSignature32` answers `{cdecl, 1}` for this body off the recovered
+    // frame. That count is `max index + 1` over the slots the body happens to
+    // touch, i.e. a LOWER bound, so it must never reach a call-site cap.
+    expect(m.has(0x401000)).toBe(false);
+  });
+
+  it("omits a function whose only evidence is a register convention", () => {
+    const m = calleeCleanupSignatures(
+      new Map([
+        [
+          0x401000,
+          at([
+            ["mov", "eax, ecx"],
+            ["ret", ""],
+          ]),
+        ],
+      ]),
+    );
+    expect(m.has(0x401000)).toBe(false);
+  });
+
+  /**
+   * THE REFUSAL THAT MAKES THIS A CEILING RATHER THAN A GUESS, and it is a
+   * measured case rather than a hypothetical: t32's `sub_404360` ends its own
+   * body in a bare `ret` at 0x4043EF, but the detected extent swallows two MSVC
+   * `__except` filter funclets and the LAST instruction in it is the second
+   * funclet's `ret 0x4`. Every one of the three call sites does `add esp, 0xc`
+   * — three cdecl arguments — so reading the last instruction as the epilogue
+   * deleted two real arguments at each of them.
+   */
+  it("refuses a function whose returns disagree, the swallowed-funclet shape", () => {
+    const m = calleeCleanupSignatures(
+      new Map([
+        [
+          0x404360,
+          at([
+            ["push", "ebx"],
+            ["mov", "eax, dword ptr [esp + 0x10]"],
+            ["ret", ""],
+            ["mov", "ecx, dword ptr [esp + 4]"],
+            ["ret", "0x4"],
+          ]),
+        ],
+      ]),
+    );
+    expect(m.has(0x404360)).toBe(false);
+  });
+
+  /**
+   * THE CONTROL for the refusal above: two returns that AGREE are a stdcall
+   * function with two exit paths, which is ordinary. A unanimity test that
+   * refused every multi-return function would reach 0 by no longer looking.
+   */
+  it("accepts a function with two returns that agree", () => {
+    const m = calleeCleanupSignatures(
+      new Map([
+        [
+          0x401000,
+          at([
+            ["cmp", "eax, 0"],
+            ["je", "0x401010"],
+            ["ret", "0x8"],
+            ["mov", "eax, 1"],
+            ["ret", "0x8"],
+          ]),
+        ],
+      ]),
+    );
+    expect(m.get(0x401000)).toEqual({ convention: "stdcall", paramCount: 2 });
+  });
+
+  it("omits an empty body and a `ret 0`", () => {
+    const m = calleeCleanupSignatures(
+      new Map([
+        [0x401000, []],
+        [0x402000, at([["ret", "0x0"]])],
+      ]),
+    );
+    expect(m.size).toBe(0);
   });
 });

@@ -286,19 +286,56 @@ function inferSignature64(funcInsns: Instruction[]): FunctionSignature {
   return { convention: "fastcall", paramCount: maxParam };
 }
 
+/** The bytes one `ret`/`retn` pops, 0 for a bare one, or null if unreadable. */
+function retPopBytes(insn: Instruction): number | null {
+  const op = insn.opStr.trim();
+  if (op === "") return 0;
+  const m = op.match(/^0x([0-9a-fA-F]+)$/);
+  const n = m ? Number.parseInt(m[1], 16) : Number.parseInt(op, 10);
+  return Number.isNaN(n) ? null : n;
+}
+
 /**
- * Bytes the callee itself pops on return, or `null` where it pops none.
+ * Bytes the callee itself pops on return, or `null` where it pops none — asked
+ * of EVERY `ret` in the extent, and refused the moment two of them disagree.
  *
- * The only exact statement about arity an x86 body makes about itself: under
- * every callee-cleans convention `ret N` is the argument area's size in bytes,
- * written by the compiler that knew the prototype.
+ * Under every callee-cleans convention `ret N` is the argument area's size in
+ * bytes, written by the compiler that knew the prototype, which is what makes
+ * this the only exact statement about arity an x86 body makes about itself.
+ *
+ * **THE LAST INSTRUCTION OF A DETECTED EXTENT IS NOT THE FUNCTION'S EPILOGUE**,
+ * and reading it as one was a live defect this rule was written to end. t32's
+ * `sub_404360` is the witness: its body ends in a bare `ret` at 0x4043EF, but
+ * the detected extent runs to 0x404452 and swallows two MSVC `__except` filter
+ * funclets, the second of which ends `ret 0x4` at 0x40444F. Read off the last
+ * instruction that says "stdcall, 1 parameter" — while every one of the three
+ * call sites does `add esp, 0xc` after the call, i.e. THREE cdecl arguments,
+ * which the machine states outright. The unanimity test refuses the whole
+ * function instead, because a body whose returns disagree about how much the
+ * callee pops is not one this analysis can read at all.
+ *
+ * The refusal matters in two different ways to the two readers, and it is one
+ * declaration because the fact is one fact. For `inferSignature`'s panel label
+ * it replaces a false claim with the evidence below it (or with silence). For
+ * `calleeCleanupSignatures` it is load-bearing: a ceiling DELETES arguments at
+ * the call site, so a wrong one is `peek-a-bin-qb2x`'s failure mode — measured
+ * here at three call sites per x86 binary, each losing two real arguments, and
+ * invisible to gcc, to `corpus/arity.ts` (the callee is a `sub_`) and to
+ * `distinct callees lost` (peek-a-bin-s1f6.2).
+ *
+ * The last instruction must still BE a `ret`, which is a narrowing of the old
+ * rule rather than a different one: a function ending in a tail `jmp` with a
+ * `ret N` somewhere inside it is not evidence this wants to start admitting.
  */
 function calleeStackCleanup(funcInsns: Instruction[]): number | null {
   const last = funcInsns[funcInsns.length - 1];
   if (!last || (last.mnemonic !== "ret" && last.mnemonic !== "retn")) return null;
-  const m = last.opStr.match(/^0x([0-9a-fA-F]+)$/);
-  const n = m ? Number.parseInt(m[1], 16) : Number.parseInt(last.opStr, 10);
-  if (Number.isNaN(n) || n <= 0) return null;
+  const n = retPopBytes(last);
+  if (n === null || n <= 0) return null;
+  for (const insn of funcInsns) {
+    if (insn.mnemonic !== "ret" && insn.mnemonic !== "retn") continue;
+    if (retPopBytes(insn) !== n) return null;
+  }
   return n;
 }
 
@@ -545,4 +582,46 @@ export function inferSignature(
       ? analyzeStackFrame(func, instructions, arch, is64, funcInsnMap)
       : stackFrame;
   return inferSignature32(funcInsns, frame);
+}
+
+/**
+ * Every function whose own body states its arity EXACTLY: `ret N`, keyed by
+ * entry address.
+ *
+ * THE CEILING HALF OF `inferSignature32`, AND DELIBERATELY ONLY THAT HALF.
+ * `inferSignature32` reads three kinds of evidence in precedence order and only
+ * the first is a measurement — under every callee-cleans convention `ret N` is
+ * the argument area's size in bytes, written by the compiler that had the
+ * prototype, so `N / 4` is the arity and not a bound on it. The other two are
+ * LOWER BOUNDS by their own docstrings: `framedParamCount` is `max index + 1`
+ * over the slots the body happens to touch (a trailing untouched argument is
+ * invisible to it) and `registerConvention32` says nothing about a count at
+ * all. A call-site cap built on either would delete arguments the machine
+ * passes, which is the one direction this codebase refuses.
+ *
+ * So this map carries `ret N` and nothing else. A function that ends in a bare
+ * `ret` is ABSENT rather than present with a count: "the caller cleans up" is
+ * a statement about the convention and no statement whatever about arity.
+ *
+ * x86 ONLY, AND THE x64 CEILING IS REFUSED. `inferSignature64` counts the
+ * fastcall registers the first 20 instructions read before writing — a callee
+ * that spills nothing and reads R9 late reads as 1 — so it is a lower bound
+ * capped at 4 and capping a call site on it would delete real arguments and
+ * then the set-up that computed them, as dead. That is `peek-a-bin-qb2x`'s
+ * vanished exit code exactly. There is no x64 entry in this map, by
+ * construction rather than by omission (`peek-a-bin-s1f6.2`).
+ *
+ * Cheap enough to build in the whole-image pre-pass beside the clobber closure:
+ * one instruction is read per function, where `writtenRegs` reads every one.
+ */
+export function calleeCleanupSignatures(
+  funcInsnMap: ReadonlyMap<number, Instruction[]>,
+): Map<number, FunctionSignature> {
+  const out = new Map<number, FunctionSignature>();
+  for (const [addr, insns] of funcInsnMap) {
+    const cleanup = calleeStackCleanup(insns);
+    if (cleanup === null) continue;
+    out.set(addr, { convention: "stdcall", paramCount: Math.floor(cleanup / 4) });
+  }
+  return out;
 }

@@ -42,6 +42,8 @@ interface LiftOpts {
   clobbers?: CalleeClobbers;
   /** For a tail-jump fixture: a block with no successors. */
   succs?: number[];
+  /** `firstCalleeSavedWrites`' answer, for the x86 push walk. */
+  firstWrites?: Map<string, number>;
 }
 
 function lift(list: [string, string][], opts: LiftOpts = {}): IRStmt[] {
@@ -54,7 +56,7 @@ function lift(list: [string, string][], opts: LiftOpts = {}): IRStmt[] {
     opts.iat ?? new Map(),
     new Map(),
     opts.funcs ?? new Map(),
-    undefined,
+    opts.firstWrites,
     opts.clobbers,
   );
 }
@@ -3091,5 +3093,145 @@ describe("liftBlock — a memory-operand call target is an expression", () => {
     const call = callOf(lift([["call", "dword ptr [ebp + notareg]"]], { is64: false }));
 
     expect(call.targetExpr).toBeUndefined();
+  });
+});
+
+/**
+ * THE x86 `ret N` CALL-SITE CEILING (peek-a-bin-s1f6.2).
+ *
+ * The callee's own stack cleanup is the one exact arity statement an x86 body
+ * makes about itself, so it caps the backwards push walk. Every assertion here
+ * is about the ONLY-REDUCE direction: the ceiling can drop an argument the walk
+ * over-collected and can never add one, which is what keeps it incapable of
+ * producing `corpus/arity.ts`'s OVER verdict.
+ */
+describe("liftBlock — a stdcall callee's `ret N` caps the push walk", () => {
+  const CALLEE = 0x402000;
+  const sigs = (paramCount: number, convention = "stdcall"): CalleeClobbers => ({
+    byAddress: new Map(),
+    unresolved: [],
+    signatures: new Map([[CALLEE, { convention, paramCount }]]),
+  });
+
+  const argsOfCall = (stmts: IRStmt[]): IRExpr[] => {
+    const last = lastOf(stmts);
+    if (last.kind !== "call_stmt") throw new Error(`expected a call, got ${last.kind}`);
+    return last.call.args;
+  };
+
+  const threePushes: [string, string][] = [
+    ["push", "0x3"],
+    ["push", "0x2"],
+    ["push", "0x1"],
+    ["call", "0x402000"],
+  ];
+
+  it("caps a three-push walk at one for a callee that ends in `ret 4`", () => {
+    const args = argsOfCall(lift(threePushes, { is64: false, clobbers: sigs(1) }));
+    // The walk runs backwards from the call, so index 0 is argument 1 — the
+    // push NEAREST the call. Truncation therefore drops the far end, which is
+    // the half that is not in this callee's argument list.
+    expect(args).toEqual([irConst(1, 4)]);
+  });
+
+  /**
+   * THE CONTROL. A callee that ends in a bare `ret` cleans up nothing, so it is
+   * ABSENT from the map — "the caller cleans up" is a statement about the
+   * convention and none whatever about arity. The walk is untouched.
+   */
+  it("leaves the walk alone for a cdecl callee with no `ret N`", () => {
+    const empty: CalleeClobbers = { byAddress: new Map(), unresolved: [], signatures: new Map() };
+    const args = argsOfCall(lift(threePushes, { is64: false, clobbers: empty }));
+    expect(args).toEqual([irConst(1, 4), irConst(2, 4), irConst(3, 4)]);
+  });
+
+  it("leaves the walk alone when no signature map was built at all", () => {
+    const args = argsOfCall(lift(threePushes, { is64: false }));
+    expect(args).toHaveLength(3);
+  });
+
+  /** ONLY-REDUCE: a ceiling above what the walk found adds nothing. */
+  it("never adds an argument the walk did not find", () => {
+    const args = argsOfCall(
+      lift(
+        [
+          ["push", "0x1"],
+          ["call", "0x402000"],
+        ],
+        { is64: false, clobbers: sigs(4) },
+      ),
+    );
+    expect(args).toEqual([irConst(1, 4)]);
+  });
+
+  /**
+   * A BOUND rather than a measured case: `calleeCleanupSignatures` refuses
+   * `n <= 0`, so a count of 0 cannot arise from a real image. Asserted anyway,
+   * because the truncation must not be written as "keep at least one".
+   */
+  it("caps at zero for a callee the map says takes none", () => {
+    const args = argsOfCall(lift(threePushes, { is64: false, clobbers: sigs(0) }));
+    expect(args).toEqual([]);
+  });
+
+  /**
+   * The ceiling is keyed on the CALLEE's entry address. A call to another
+   * address is not this callee's, so nothing is capped — the map must not be
+   * read as "some function nearby takes one argument".
+   */
+  it("does not cap a call to a different address", () => {
+    const args = argsOfCall(
+      lift(
+        [
+          ["push", "0x3"],
+          ["push", "0x2"],
+          ["push", "0x1"],
+          ["call", "0x403000"],
+        ],
+        { is64: false, clobbers: sigs(1) },
+      ),
+    );
+    expect(args).toHaveLength(3);
+  });
+
+  /**
+   * An INDIRECT call names the SLOT, not the callee. Looking that address up in
+   * a map keyed by function entry would be a coincidence if it ever hit, so the
+   * `direct` test is asserted rather than left to the corpus.
+   */
+  it("does not cap an indirect call whose slot address collides with a callee", () => {
+    const args = argsOfCall(
+      lift(
+        [
+          ["push", "0x3"],
+          ["push", "0x2"],
+          ["push", "0x1"],
+          ["call", "dword ptr [0x402000]"],
+        ],
+        { is64: false, clobbers: sigs(1) },
+      ),
+    );
+    expect(args).toHaveLength(3);
+  });
+
+  /**
+   * x64 NEVER CONSULTS IT, and the map is empty there by construction. Asserted
+   * over a map that is NOT empty, so the test discriminates the wiring rather
+   * than restating `calleeCleanupSignatures`' own x86 gate: `collectArgs64`
+   * reads registers and takes no ceiling at all.
+   */
+  it("does not cap the x64 register walk", () => {
+    const st = new RegState();
+    const args = argsOfCall(
+      lift(
+        [
+          ["mov", "rcx, 1"],
+          ["mov", "rdx, 2"],
+          ["call", "0x402000"],
+        ],
+        { is64: true, state: st, clobbers: sigs(1) },
+      ),
+    );
+    expect(args).toHaveLength(2);
   });
 });

@@ -10471,3 +10471,68 @@ describe("decompileFunction — frame scaffolding is deleted only where nothing 
     expect(report?.deleted["sp-alloc"]).toBe(0);
   });
 });
+
+/**
+ * THE x86 `ret N` CALL-SITE CEILING, END TO END (peek-a-bin-s1f6.2).
+ *
+ * `collectArgs32`'s backwards push walk stops at a register save and at the
+ * start of the block, and nothing else; a callee that cleans up 4 bytes takes
+ * one argument whatever the walk collected. The stage-level test pins the
+ * argument list, which is the IR; this pins the LINE, which is what a reader is
+ * handed — the whole reason `pipeline.test.ts` exists.
+ */
+describe("pipeline — a stdcall callee's `ret N` caps the emitted argument list", () => {
+  const CALLEE = 0x402000;
+
+  function runCapped(signatures: Map<number, FunctionSignature>): string {
+    const instructions = seq(0x401000, [
+      ["push", "0x3"],
+      ["push", "0x2"],
+      ["push", "0x1"],
+      ["call", "0x402000"],
+      ["ret"],
+    ]);
+    const last = instructions[instructions.length - 1];
+    const func: DisasmFunction = {
+      name: "sub_401000",
+      address: 0x401000,
+      size: last.address + last.size - 0x401000,
+    };
+    const clobbers: CalleeClobbers = {
+      byAddress: new Map(),
+      unresolved: [],
+      signatures,
+    };
+    return decompileFunction(
+      func,
+      instructions,
+      new Map<number, Xref[]>(),
+      null,
+      null,
+      false,
+      new Map(),
+      new Map(),
+      new Map(),
+      new Map([[CALLEE, { name: "sub_402000", address: CALLEE }]]),
+      undefined,
+      undefined,
+      undefined,
+      clobbers,
+    ).code;
+  }
+
+  it("emits one argument for a callee that ends in `ret 4`", () => {
+    const code = runCapped(new Map([[CALLEE, { convention: "stdcall", paramCount: 1 }]]));
+    expect(code).toContain("sub_402000(1)");
+  });
+
+  /**
+   * THE CONTROL, and it is the same fixture: a callee with no `ret N` is absent
+   * from the map, and all three pushes reach the page exactly as they did
+   * before this rule existed.
+   */
+  it("emits all three for a cdecl callee with no `ret N`", () => {
+    const code = runCapped(new Map());
+    expect(code).toContain("sub_402000(1, 2, 3)");
+  });
+});

@@ -3,6 +3,7 @@ import { resolveBranchTargetAddr } from "../callSummary";
 import type { BasicBlock } from "../cfg";
 import type { CrtIdiom } from "../crtIdioms";
 import { resolveRipMemExpr, resolveRipTarget } from "../ripRelative";
+import type { FunctionSignature } from "../signatures";
 import { pushedImmediate, STACK_TRAFFIC } from "../stackIdiom";
 import type { DisasmFunction, Instruction } from "../types";
 import {
@@ -2313,7 +2314,7 @@ export function liftBlock(
         ? idiom.args.map((r) => irReg(r))
         : is64
           ? collectArgs64(regState)
-          : collectArgs32(block, insn, is64, calleeSavedFirstWrite);
+          : collectArgs32(block, insn, is64, calleeSavedFirstWrite, calleeClobbers?.signatures);
       const call: IRCall = {
         kind: "call",
         target: target.name,
@@ -2368,7 +2369,7 @@ export function liftBlock(
           ? idiom.args.map((r) => irReg(r))
           : is64
             ? collectArgs64(regState)
-            : collectArgs32(block, insn, is64, calleeSavedFirstWrite);
+            : collectArgs32(block, insn, is64, calleeSavedFirstWrite, calleeClobbers?.signatures);
         // An import thunk is NAMED after the import it jumps to (functionDetect's
         // thunk renaming), so the resolved name here is the function's own name
         // and `return RtlVirtualUnwind();` would be a call to itself. The
@@ -3394,11 +3395,47 @@ function nestedInLaterCallArgs(insns: Instruction[], callIdx: number, is64: bool
   return false;
 }
 
+/**
+ * The callee's own `ret N`, as a CEILING on this call site's argument count.
+ *
+ * `null` where there is no such statement — an import (the IAT slot is not a
+ * detected function), an indirect call, a callee whose body ends in a bare
+ * `ret`, or a caller that built no signature map. The three are deliberately
+ * one answer: "nobody told us" and "the callee cleans up nothing" are both
+ * "this call site has no ceiling", and neither is a count.
+ *
+ * ONLY-REDUCE, WHICH IS THE WHOLE SAFETY ARGUMENT. `ret N` is exact — under
+ * every callee-cleans convention it is the argument area the compiler that had
+ * the prototype wrote — so a walk that collected MORE than `N / 4` pushes has
+ * walked out of the argument list, and truncating drops the far end (the walk
+ * runs backwards from the call, so index 0 is argument 1). A walk that
+ * collected fewer is left exactly as it is: the ceiling can never ADD an
+ * argument, so it cannot produce the OVER verdict `corpus/arity.ts` gates at 0
+ * and cannot resurrect `peek-a-bin-6lmh`'s invented arguments in any form.
+ *
+ * It must never be asked of x64 — see `calleeCleanupSignatures` — and it is
+ * not: the map is empty there by construction.
+ */
+function calleeArityCeiling(
+  callInsn: Instruction,
+  calleeSigs: ReadonlyMap<number, FunctionSignature> | undefined,
+): number | null {
+  if (calleeSigs === undefined || calleeSigs.size === 0) return null;
+  const target = resolveBranchTargetAddr(callInsn);
+  // A `direct` target names the callee's entry; an `indirectMem` one names the
+  // SLOT, so looking that address up in a map keyed by function entry would be
+  // a coincidence if it ever hit.
+  if (target === null || target.kind !== "direct") return null;
+  const sig = calleeSigs.get(target.addr);
+  return sig === undefined ? null : sig.paramCount;
+}
+
 function collectArgs32(
   block: BasicBlock,
   callInsn: Instruction,
   is64: boolean,
   calleeSavedFirstWrite: Map<string, number> | undefined,
+  calleeSigs?: ReadonlyMap<number, FunctionSignature>,
 ): IRExpr[] {
   // Scan backwards from call for consecutive push instructions
   const args: IRExpr[] = [];
@@ -3435,6 +3472,11 @@ function collectArgs32(
     if (isCalleeSavedSave(insns[i], op, calleeSavedFirstWrite)) break;
     args.push(parseOperand(op, insns[i], is64));
   }
+
+  // The callee's own `ret N`, where it has one. ONLY-REDUCE — see
+  // `calleeArityCeiling` for why that direction is the whole safety argument.
+  const ceiling = calleeArityCeiling(callInsn, calleeSigs);
+  if (ceiling !== null && args.length > ceiling) args.length = ceiling;
   return args;
 }
 
