@@ -301,6 +301,11 @@ function forEachRead(stmt: IRStmt, visit: (e: IRExpr, ancestors: IRExpr[]) => vo
           rec(e.address, inner);
           break;
         case "call":
+          // The target is evaluated BEFORE the arguments, so it is a read like
+          // any other: `call [ebp + 8]` reads the frame register, and a walk
+          // that missed it would let this pass delete the frame copy out from
+          // under the transfer (peek-a-bin-s1f6.1).
+          if (e.targetExpr) rec(e.targetExpr, inner);
           for (const a of e.args) rec(a, inner);
           break;
         case "ternary":
