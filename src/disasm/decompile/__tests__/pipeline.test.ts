@@ -6271,6 +6271,71 @@ describe("decompileFunction — a value read after another block redefined its r
     expect(code).not.toMatch(/\brax_\d+\b/);
   });
 
+  /**
+   * `swapDefWithCopy`'s repair, DELETED where the register it rewrites is dead.
+   *
+   * `mov rax, [rcx]` defines the value the store two blocks down reads, and the
+   * call in between rewrites RAX — so `splitStaleReads` parks the value in
+   * `rax_1` and `swapDefWithCopy` writes the pair `rax_1 = *(rcx); rax = rax_1;`
+   * rather than the other order, keeping the register's own definition for
+   * readers that are not stale (peek-a-bin-xb2f). Here there are none: the very
+   * next statement is the call, which redefines RAX with nothing reading it in
+   * between, so `foldBlock` drops the second line. The value the function
+   * computes is untouched — only a name assigned and never mentioned goes
+   * (peek-a-bin-5b6q.2).
+   */
+  it("drops the repair's register copy where the register is dead", () => {
+    const code = run(
+      seq(0x401000, [
+        ["mov", "rax, qword ptr [rcx]"], // 0x401000
+        ["mov", "rbx, rax"], // 0x401004
+        ["call", "0x403010"], // 0x401008 — rewrites RAX
+        ["test", "rax, rax"], // 0x40100c
+        ["je", "0x40101c"], // 0x401010
+        ["mov", "qword ptr [rbx], 0"], // 0x401014 — the stale read
+        ["jmp", "0x40101c"], // 0x401018
+        ["ret"], // 0x40101c
+      ]),
+      true,
+    );
+    expect(code).toMatch(/rax_\d+ = \*\(int64_t\*\)\(rcx\);/);
+    expect(code).toMatch(/\*\(int64_t\*\)\(rax_\d+\) = 0;/);
+    // The repair's second line. Before peek-a-bin-5b6q.2: `rax = rax_1;`.
+    expect(code).not.toMatch(/^\s*rax = rax_\d+;$/m);
+  });
+
+  /**
+   * THE SAME REPAIR, SURVIVING — the case peek-a-bin-xb2f measured as a defect
+   * when the copy was appended the other way round and the register lost its
+   * only assignment.
+   *
+   * Identical to the test above but for a block between the definition and the
+   * call that reads RAX itself. That read is not stale — RAX still holds the
+   * value there — so it is left naming the register, and deleting `rax = rax_1`
+   * would leave it reading a register the emitted C never assigns. The deletion
+   * rule sees it through `blockLiveOut`: RAX is live out of the defining block.
+   */
+  it("keeps the repair's register copy where a successor reads the register", () => {
+    const code = run(
+      seq(0x401000, [
+        ["mov", "rax, qword ptr [rcx]"], // 0x401000
+        ["mov", "rbx, rax"], // 0x401004
+        ["test", "rdx, rdx"], // 0x401008
+        ["je", "0x401018"], // 0x40100c
+        ["mov", "qword ptr [rdx], rax"], // 0x401010 — a NON-stale read
+        ["jmp", "0x401018"], // 0x401014
+        ["call", "0x403010"], // 0x401018 — rewrites RAX
+        ["mov", "qword ptr [rbx], 0"], // 0x40101c — the stale read
+        ["ret"], // 0x401020
+      ]),
+      true,
+    );
+    expect(code).toMatch(/rax_\d+ = \*\(int64_t\*\)\(rcx\);/);
+    expect(code).toMatch(/^\s*rax = rax_\d+;$/m);
+    expect(code).toMatch(/\*\(int64_t\*\)\(rdx\) = rax;/);
+    expect(code).toMatch(/\*\(int64_t\*\)\(rax_\d+\) = 0;/);
+  });
+
   it("keeps the register's own definition, which a branch condition still reads", () => {
     // The copy is written as `esi_1 = arg; esi = esi_1;`, not `esi = arg;
     // esi_1 = esi;`. Branch conditions are built by `structure.ts` from
@@ -8859,11 +8924,46 @@ describe("a matched push/pop restores the value the machine saved", () => {
    * slot is then the only thing that can name the saved value at all.
    */
   it("names the slot outright in a region SSA never renames", () => {
+    // The interfering write has to be LIVE for the slot to reach the page, and
+    // that is a change of fixture rather than of rule (peek-a-bin-5b6q.2).
+    // `mov ecx, 1` is read twice below, so the fold neither inlines nor deletes
+    // it, and the write it stands between the slot copy and its reader keeps
+    // `stk_401004 = ecx` where it is. With ONE reader the write folds away; with
+    // none — the shape this fixture used to have — `foldBlock` deletes it as a
+    // definition nothing reads, and the slot copy then has a single reader and
+    // folds into it (the case below).
+    const code = run(
+      seq(0x401000, [
+        ["ret"],
+        ["push", "ecx"],
+        ["mov", "ecx, 1"],
+        ["pop", "eax"],
+        ["add", "eax, ecx"],
+        ["add", "eax, ecx"],
+        ["ret"],
+      ]),
+    );
+    expect(code).toMatch(/stk_401004 = ecx;/);
+    expect(code).toMatch(/return stk_401004 \+ ecx \+ ecx;/);
+  });
+
+  /**
+   * The same region with the interfering write DEAD. `mov ecx, 0` before a
+   * `ret` writes a caller-saved register nothing reads again, and SSA's own
+   * dead-code elimination cannot see it: this region follows a `ret` and
+   * nothing branches to it, so `renameVariables` never reaches it and the
+   * statements carry no versions for `deadCodeElimination` to count uses of.
+   * `foldBlock` deletes it from the register liveness instead, and the slot
+   * copy — no longer separated from its reader by a write to ECX — then folds
+   * into that reader. The value returned is the same on both sides: the ECX the
+   * function was entered with (peek-a-bin-5b6q.2).
+   */
+  it("deletes a dead write in that region, and the slot copy folds after it", () => {
     const code = run(
       seq(0x401000, [["ret"], ["push", "ecx"], ["mov", "ecx, 0"], ["pop", "eax"], ["ret"]]),
     );
-    expect(code).toMatch(/stk_401004 = ecx;/);
-    expect(code).toMatch(/return stk_401004;/);
+    expect(code).not.toMatch(/ecx = 0;/);
+    expect(code).toMatch(/return ecx;/);
   });
 
   /**

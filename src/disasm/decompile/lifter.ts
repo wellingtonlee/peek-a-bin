@@ -394,8 +394,9 @@ function isValueNeutralLockedRmw(op: BinaryOp, src: IRExpr): boolean {
  * `jb`/`jae` after `test`, which are constants — is returned as `unknown` and
  * emitted as an ASSIGNMENT of `__unrecovered_N`: a definition SSA sees, so a
  * later read of the destination binds to it rather than to whatever the
- * register held before, which is strictly better than `raw` (`fold.ts`'s
- * `blockLiveOut` reads a `raw` as reading nothing). The constant forms are
+ * register held before, which is strictly better than `raw` (a `raw` is no
+ * DEFINITION anywhere in this IR — `fold.ts`'s `blockLiveOut` reads the
+ * registers its text names, but nothing models what it writes). The constant forms are
  * deliberately not spelled as `al = 1`: the reason `getCondition` refuses to
  * emit `if (1)` — a constant is a control-flow claim no gate models — applies
  * to a value that will be tested one instruction later just the same.

@@ -367,6 +367,125 @@ describe("width-sensitive identity elimination", () => {
   });
 });
 
+/**
+ * A REGISTER DEFINITION NOTHING READS.
+ *
+ * `ssaopt.ts`'s dead-code elimination already takes every versioned definition
+ * with zero uses, so what reaches this rule is what `destroySSA` creates after
+ * it has run — `swapDefWithCopy`'s `esi_1 = X; esi = esi_1;` split and the
+ * copies phi lowering writes into predecessors — plus anything in a region SSA
+ * never versioned at all. The deletion is the one sound half of copy
+ * coalescing: it removes a copy nobody reads and renames nothing
+ * (peek-a-bin-5b6q.2).
+ */
+describe("dead register definitions", () => {
+  const eax = irReg("eax");
+  const ecx = irReg("ecx");
+
+  it("deletes a definition redefined with no read in between", () => {
+    // No `liveOut` argument: a redefinition inside the block ends the value's
+    // live range, so what any successor does is irrelevant.
+    const out = foldBlock([assign(eax, ecx), assign(eax, irConst(5))]);
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ kind: "assign", src: { kind: "const", value: 5 } });
+  });
+
+  it("deletes a definition no successor reads", () => {
+    const out = foldBlock([assign(eax, ecx), { kind: "return" }], new Set(["rbx"]));
+    expect(out).toEqual([{ kind: "return" }]);
+  });
+
+  it("keeps a definition a successor reads", () => {
+    const stmts = [assign(eax, ecx), { kind: "return" } as IRStmt];
+    expect(foldBlock(stmts, new Set(["rax"]))).toHaveLength(2);
+  });
+
+  it("keeps a definition read later in the block", () => {
+    // Two readers, so the single-use inlining does not take it either and the
+    // assignment has to be here for the deletion rule to be the thing tested.
+    const stmts: IRStmt[] = [
+      assign(eax, ecx),
+      { kind: "store", address: irReg("edx"), value: eax, size: 4 },
+      { kind: "store", address: irReg("ebx"), value: eax, size: 4 },
+    ];
+    expect(foldBlock(stmts, new Set())).toHaveLength(3);
+  });
+
+  it("counts a read in the redefining statement itself", () => {
+    // `eax = eax + 1` reads the old value before writing the new one, so the
+    // first definition is live and the two merge rather than one being dropped.
+    // Deleted instead, the survivor would read an EAX nothing assigns.
+    const stmts = [
+      assign(eax, ecx),
+      assign(eax, irBinary("+", eax, irConst(1))),
+      { kind: "return", value: eax } as IRStmt,
+    ];
+    // Everything folds into the return here; what the rule decides is WHOSE
+    // value reaches it. Deleted instead, the `+ 1` would be over an EAX nothing
+    // in the block assigns.
+    const out = foldBlock(stmts, new Set());
+    expect(out).toEqual([{ kind: "return", value: irBinary("+", ecx, irConst(1)) }]);
+  });
+
+  it("counts a guard's read", () => {
+    // The branches are extracted after this stage, so a condition is an
+    // ordinary statement here — and the one read this pass would otherwise be
+    // blind to.
+    const stmts: IRStmt[] = [
+      assign(eax, ecx),
+      { kind: "branch", condition: eax, target: 0x401000, jcc: "jne" },
+    ];
+    expect(foldBlock(stmts, new Set())).toHaveLength(2);
+  });
+
+  it("treats a call's result register as a redefinition", () => {
+    const stmts: IRStmt[] = [
+      assign(eax, ecx),
+      { kind: "call_stmt", call: { kind: "call", target: "f", args: [] }, resultDest: eax },
+    ];
+    expect(foldBlock(stmts, new Set())).toHaveLength(1);
+  });
+
+  it("keeps a definition across a raw", () => {
+    // An unlifted instruction reads nothing this IR counts and writes nothing
+    // it counts either, so neither half of the question can be answered across
+    // one. The inlining pass tolerates a raw because it only relocates a value
+    // it can see; a deletion asserts that nobody reads it.
+    const stmts: IRStmt[] = [
+      assign(eax, ecx),
+      { kind: "raw", text: "fldz" },
+      assign(eax, irConst(5)),
+    ];
+    expect(foldBlock(stmts, new Set(["rax"]))).toHaveLength(3);
+  });
+
+  it("keeps a definition of the stack pointer", () => {
+    // `push`, `pop` and a `call`'s return address are not lifted at all, so a
+    // write to RSP that looks dead here is the prologue normalisation's
+    // business, not this pass's.
+    const rsp = irReg("rsp");
+    const stmts = [assign(rsp, irBinary("-", rsp, irConst(0x28))), assign(rsp, irReg("rbp"))];
+    expect(foldBlock(stmts, new Set())).toHaveLength(2);
+  });
+
+  it("keeps a definition whose source has side effects", () => {
+    const call: IRExpr = { kind: "call", target: "GetLastError", args: [] };
+    const stmts = [assign(eax, call), assign(eax, irConst(0))];
+    expect(foldBlock(stmts, new Set(["rax"]))).toHaveLength(2);
+  });
+
+  it("deletes nothing past the end of the block without a liveOut set", () => {
+    // Absent is "no CFG was supplied", not "nothing escapes" — the same reading
+    // the inlining pass's escape test takes of the same argument.
+    expect(foldBlock([assign(eax, ecx)])).toHaveLength(1);
+  });
+
+  it("cascades: a copy deleted can make its own source dead", () => {
+    const stmts = [assign(eax, irBinary("+", ecx, irConst(1))), assign(irReg("edx"), eax)];
+    expect(foldBlock(stmts, new Set())).toEqual([]);
+  });
+});
+
 describe("hasSideEffects", () => {
   const call: IRExpr = { kind: "call", target: "GetLastError", args: [] };
 

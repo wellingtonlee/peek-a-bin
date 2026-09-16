@@ -1,5 +1,5 @@
 import type { BinaryOp, IRExpr, IRStmt } from "./ir";
-import { canonReg, irConst, mapCallOperands } from "./ir";
+import { canonReg, irConst, isKnownRegister, mapCallOperands } from "./ir";
 
 /** Shallow structural equality for simple expressions (reg, const, var). */
 function exprEq(a: IRExpr, b: IRExpr): boolean {
@@ -863,10 +863,26 @@ function readsInStmt(stmt: IRStmt, out: Set<string>): void {
     case "branch":
       readRegs(stmt.condition, out);
       return;
-    // `raw` is deliberately silent. Its text is an unlifted instruction that
-    // reaches the page as a comment, so it reads nothing in the emitted C, and
-    // treating the register names inside it as reads would hold values alive for
-    // a statement that cannot use them.
+    // AN UNLIFTED INSTRUCTION READS THE REGISTERS ITS TEXT NAMES.
+    //
+    // This arm used to be silent, on the reading that a `raw` reaches the page
+    // as a comment and so reads nothing in the emitted C. That is true of
+    // `movdqa` and false of the one raw whose operand becomes a *statement*: an
+    // indirect `jmp [edx*4 + table]` is lifted as a raw, and `structureSwitch`
+    // spells the block's switch header from it, so EDX is read on the page by a
+    // line no statement in this IR holds. t32 `sub_40B780` is the witness — its
+    // `and edx, ecx` at 0x40B814 has no other reader, and with the raw silent
+    // the dead-copy rule deleted it and left `switch (edx)` dispatching on the
+    // unmasked value (peek-a-bin-5b6q.2).
+    //
+    // A text scan is an over-approximation in the safe direction: it can only
+    // hold a value alive, never release one. `isKnownRegister` is the membership
+    // test (`regSize` is not — it falls back to 4 for anything it does not
+    // recognise), so `xmm0` and `ptr` contribute nothing.
+    case "raw":
+      for (const token of stmt.text.split(/[^A-Za-z0-9]+/))
+        if (token !== "" && isKnownRegister(token)) out.add(canonReg(token));
+      return;
     default:
       return;
   }
@@ -898,8 +914,46 @@ function readsInStmt(stmt: IRStmt, out: Set<string>): void {
  * importing nothing but `ir.ts` — `cfg.ts` pulls in dagre, and `fold.test.ts`
  * has no reason to load a graph layout engine.
  */
+/**
+ * Canonical registers a block's final instruction names, when that instruction
+ * is an indirect transfer.
+ *
+ * THE ONE READER OF A REGISTER THAT IS NOT A STATEMENT ANYWHERE. `structureCFG`
+ * spells a jump table's `switch` header from the dispatch instruction itself —
+ * `jumpTableIndexReg` reads `[edx*4 + 0x40B8F0]` straight off `block.insns`, and
+ * the fallback parses that operand — so EDX reaches the emitted page from a
+ * block whose statement list mentions it nowhere. t32 `sub_40B780` is the
+ * witness: its `and edx, ecx` has no other reader, and without this the
+ * dead-definition rule deleted it and left `switch (edx)` dispatching on the
+ * unmasked value (peek-a-bin-5b6q.2).
+ *
+ * Seeded into that block's `liveOut` rather than its `use`, which is what makes
+ * both halves right: ordinary backward liveness carries it to every predecessor
+ * that defines the register, and a definition in the dispatch block's own list
+ * is held by the same set.
+ *
+ * `insns` is optional so a hand-written CFG in a unit test still type-checks;
+ * every caller holding a real `BasicBlock` supplies it by construction. The
+ * scan takes every register the operand names rather than the scaled one alone,
+ * because it can only hold a value alive, never release one.
+ */
+function dispatchRegs(insns: readonly { mnemonic: string; opStr: string }[] | undefined): string[] {
+  const last = insns?.[insns.length - 1];
+  if (!last) return [];
+  const mn = last.mnemonic.toLowerCase();
+  if (mn !== "jmp" && mn !== "call") return [];
+  const out: string[] = [];
+  for (const token of last.opStr.split(/[^A-Za-z0-9]+/))
+    if (token !== "" && isKnownRegister(token)) out.push(canonReg(token));
+  return out;
+}
+
 export function blockLiveOut(
-  blocks: readonly { id: number; succs: readonly number[] }[],
+  blocks: readonly {
+    id: number;
+    succs: readonly number[];
+    insns?: readonly { mnemonic: string; opStr: string }[];
+  }[],
   stmts: ReadonlyMap<number, IRStmt[]>,
 ): Map<number, Set<string>> {
   const use = new Map<number, Set<string>>();
@@ -920,7 +974,9 @@ export function blockLiveOut(
     use.set(b.id, u);
     def.set(b.id, d);
     liveIn.set(b.id, new Set(u));
-    liveOut.set(b.id, new Set());
+    // Seeded, not empty: see `dispatchRegs`. Nothing clears a `liveOut` set, so
+    // the seed survives every pass of the fixpoint below.
+    liveOut.set(b.id, new Set(dispatchRegs(b.insns)));
   }
   for (let pass = 0; pass <= blocks.length + 1; pass++) {
     let changed = false;
@@ -951,10 +1007,76 @@ export function blockLiveOut(
 }
 
 /**
+ * Whether the value this statement writes to `canon` is DEAD — nothing reads it
+ * anywhere, so deleting the statement changes no value the emitted C computes.
+ *
+ * Two halves, and both are needed. Below the definition, the first statement to
+ * read the register ends the question (the value is live) and the first to
+ * redefine it ends the value's live range, so a definition redefined with no
+ * read in between is dead whatever any successor does. Reaching the end of the
+ * block without either, the answer is `blockLiveOut`'s: the register is dead
+ * only if no path out of this block reads it before writing it.
+ *
+ * `liveOut` being absent is NOT "nothing escapes" — it is "no CFG was supplied",
+ * which is exactly the state in which the escape cannot be established. A caller
+ * that omits it gets no deletions past the end of the block, matching the
+ * inlining pass's own reading of the same argument.
+ *
+ * WHAT THIS IS FOR. `ssaopt.ts`'s dead-code elimination already removes a
+ * versioned definition with zero uses, so nothing it can see survives to here.
+ * What does survive is everything `destroySSA` *creates* after it has run: the
+ * `esi_1 = arg_0; esi = esi_1;` split `swapDefWithCopy` leaves behind, and the
+ * copies phi lowering writes into predecessors. Where the register genuinely has
+ * no reader left, the second line of that pair is a name assigned and never
+ * mentioned again (peek-a-bin-5b6q.2).
+ *
+ * WHAT IS REFUSED, and why each refusal is not conservatism for its own sake:
+ *
+ * - A `raw` anywhere in the window. It is an instruction the lifter declined to
+ *   model, reaching the page as a comment: it reads nothing this IR counts, and
+ *   it writes nothing this IR counts either, so neither "is it read below" nor
+ *   "is it redefined below" can be answered across one. The inlining pass
+ *   tolerates a raw because it only relocates a value it can see; a deletion
+ *   asserts that nobody reads it, which is the stronger claim.
+ * - A destination of RSP, at the call site. The stack pointer has no faithful
+ *   definition chain in this IR — `push`, `pop` and a `call`'s return address
+ *   are not lifted at all — so a `rsp = …` that looks dead here is the prologue
+ *   normalisation's business, not this pass's.
+ * - A source with side effects, at the call site: deleting the statement would
+ *   delete the call inside it.
+ *
+ * NOT ATTEMPTED: general copy coalescing. `v = X; r = v;` cannot become `r = X`
+ * with v's reads renamed to r — r is redefined further down, which is the whole
+ * reason `splitStaleReads` parked the value in `v` — and renaming the version's
+ * reads to `v` instead moves the copy onto the phi edges rather than removing
+ * it. Deleting a copy nothing reads is the subset of that idea which needs no
+ * renaming at all.
+ */
+function deadRegDef(
+  stmts: readonly IRStmt[],
+  from: number,
+  canon: string,
+  liveOut: ReadonlySet<string> | undefined,
+): boolean {
+  for (let j = from + 1; j < stmts.length; j++) {
+    const s = stmts[j];
+    if (s.kind === "raw") return false;
+    // Read before redefined: the value is live, whatever follows.
+    if (countReadsInStmt(s, canon) > 0) return false;
+    // Redefined with no read in between: the value dies here. Evaluated after
+    // the read count, so a redefinition that reads the old value (`eax = eax + 1`)
+    // is a read first.
+    const dest = s.kind === "assign" ? s.dest : s.kind === "call_stmt" ? s.resultDest : undefined;
+    if (dest?.kind === "reg" && canonReg(dest.name) === canon) return true;
+  }
+  return liveOut !== undefined && !liveOut.has(canon);
+}
+
+/**
  * Fold a flat list of IR statements within a single block:
  * - Constant fold
+ * - Delete register definitions nothing reads (`deadRegDef`)
  * - Inline single-use register assignments
- * - Eliminate dead register stores
  *
  * `liveOut` is the canonical registers read on some path after this block, from
  * `blockLiveOut`. Omitting it keeps the pre-`peek-a-bin-7eyn` behaviour, which
@@ -978,6 +1100,17 @@ export function foldBlock(stmts: IRStmt[], liveOut?: ReadonlySet<string>): IRStm
       // Only inline register assignments (not memory stores, not calls)
       if (stmt.kind === "assign" && stmt.dest.kind === "reg" && !hasSideEffects(stmt.src)) {
         const canon = canonReg(stmt.dest.name);
+        // A definition nothing reads is deleted outright. Checked before the
+        // inlining below, and the two cannot both fire: inlining needs exactly
+        // one reader and this needs none. `canon === "rsp"` is refused here for
+        // the same reason the inlining refuses it a few lines down — a write to
+        // the stack pointer is the prologue's, not this pass's — while a *read*
+        // of RSP inside `stmt.src` is no obstacle, because deleting a statement
+        // does not move the read to another program point (peek-a-bin-5b6q.2).
+        if (canon !== "rsp" && deadRegDef(result, i, canon, liveOut)) {
+          changed = true;
+          continue;
+        }
         // Inlining moves the whole right-hand side down to the point of use, so
         // it is only sound while nothing it depends on changes in between.
         const inputs = readRegs(stmt.src);

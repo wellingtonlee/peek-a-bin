@@ -587,6 +587,11 @@ in-block reader and eleven reads over the three blocks below it, and the emitted
 t32/t64/w64/w32 — and **0 on all four** since `pipeline.ts` passes `blockLiveOut`'s answer to the
 fold.
 
+It brackets the fold, so it also gates `foldBlock`'s **dead-definition deletion**
+(`peek-a-bin-5b6q.2`), which reads the same live-out set: ignoring `liveOut` in `deadRegDef` takes
+the run to exit 1 with **381/776/669/365 lost reads over 321/674/580/313 sites in 96/104/102/96
+functions** at `ddcca24`.
+
 The discriminator is what makes this a gate rather than another upper bound. A register read that
 no definition reaches is *usually correct output*: it is the function's entry value, which is
 exactly what a parameter arriving in a register looks like, and CLAUDE.md's crude
@@ -1597,11 +1602,14 @@ about the machine.
 
 **Adjacent copy pairs** (`copyPairs`). *What it proves:* `v = X;` immediately followed by
 `r = v;` — the shape `ssadestroy.ts`'s `swapDefWithCopy` leaves on purpose (appending the copy
-the other way lost the register's only assignment to `foldBlock`). Baseline 420/488/417/380
-pairs, of which 213/297/239/192 are the exact `ecx_1 = X; ecx = ecx_1;` shape. Decides whether
-epic 2's dead-copy elimination is worth a session. *Liveness:* `lines > 0`; **`pairs` must not be
-asserted non-zero**, since the pass this sizes would legitimately take it to 0. *Why it does not
-gate:* neither direction is a wrong statement about the machine.
+the other way lost the register's only assignment to `foldBlock`). This row **decided epic 2's
+dead-copy elimination and then measured it**: at `ddcca24` it stood at 433/539/469/394 pairs, of
+which 176/218/183/155 were the exact `ecx_1 = X; ecx = ecx_1;` shape, and `foldBlock`'s
+`deadRegDef` took it to **328/346/327/306 and 72/95/89/68** (`peek-a-bin-5b6q.2`). What is left is
+the population that is NOT dead — the register is read below the copy or live out of the block —
+and deleting any of it needs the renaming the bead refuses in both directions. *Liveness:*
+`lines > 0`; **`pairs` must not be asserted non-zero**, since the pass this sizes would legitimately
+take it to 0. *Why it does not gate:* neither direction is a wrong statement about the machine.
 
 **Goto density** (`gotoCheck` gained `lines`, `labelsUntargeted`, `funcs`; `gotosPer100Lines`).
 Baseline 5.62/4.99/4.99/5.36 per 100 lines — **3086 gotos over 58,873 lines**, 2527 labels in

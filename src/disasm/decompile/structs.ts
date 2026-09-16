@@ -571,9 +571,9 @@ function exprKey(expr: IRExpr): string {
  * than minting one, and the two names then move independently.
  *
  * ONE STATED LIMITATION, pre-existing rather than introduced: a `raw`
- * statement's register writes are not modelled anywhere in this IR (see
- * `fold.ts`'s `blockLiveOut`, which reads a `raw` as reading nothing), so a
- * base redefined by an unlifted instruction still groups across it.
+ * statement's register writes are not modelled anywhere in this IR (`fold.ts`'s
+ * `blockLiveOut` reads the registers a `raw` NAMES, which is the read side
+ * only), so a base redefined by an unlifted instruction still groups across it.
  *
  * A LOOP HEADER is the one merge that cannot diff the state against the one
  * before the construct, because its back edge is a body the walk has not

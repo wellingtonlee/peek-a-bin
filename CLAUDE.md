@@ -1349,7 +1349,22 @@ refused. **Read the long-form entry before changing the code it describes.**
   lift loop must carry all three calls** — `stackIdiom.test.ts` enforces it.
 - **`foldBlock` counts uses inside ONE block, so a definition that escapes the block is not
   single-use.** `blockLiveOut` is computed once on the unfolded program; the refusal is
-  `killedInBlock`-guarded; a **`raw` reads nothing** while a **`branch` very much is** a read.
+  `killedInBlock`-guarded; a **`branch` very much is** a read, and so are the register names inside
+  a **`raw`** and the ones a block's **indirect-jump dispatch** names — `structureCFG` spells a
+  jump table's `switch` header off `block.insns`, so that register reaches the page from a block
+  whose statements never mention it (`dispatchRegs`, seeded into that block's live-out).
+- **A register definition NOTHING reads is DELETED, and that is the ONE sound half of copy
+  coalescing** (`deadRegDef`, `fold.ts`). Everything `ssaopt.ts`'s DCE can see is already gone, so
+  the population is what `destroySSA` mints *after* it — `swapDefWithCopy`'s `esi = esi_1;` and
+  phi lowering's copies — plus regions SSA never versioned. Dead is **no read before the next
+  redefinition in this block AND not in `blockLiveOut`**; an absent `liveOut` means "no CFG was
+  supplied", never "nothing escapes". Three refusals: a **`raw` anywhere in the window** (it reads
+  and writes what this IR cannot count, and a deletion is the stronger claim than an inline), an
+  **RSP destination** (the prologue pass's business), and a **source with side effects**.
+  **General coalescing is refused in BOTH directions**: `v = X; r = v` cannot become `r = X` with
+  v's reads renamed to `r` — `r` is redefined further down, which is the whole reason
+  `splitStaleReads` parked the value — and renaming the version's reads to `v` moves the copy onto
+  the phi edges rather than removing it. `corpus/lostDefs.ts` is the negative control.
 - **Register names follow the image's width, and the phi cannot tell you what that is — ask the live
   range, not the function.** Naming is per **phi web**, taking the widest mention of its own members.
   **One name per function is still wrong** where a register carries two live ranges of different
