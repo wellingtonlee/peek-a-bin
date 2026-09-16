@@ -67,6 +67,9 @@ export function useMcpSync(
           bookmarks: data.bookmarks,
           renames: data.renames,
           comments: data.comments,
+          // The bridge never carries variable renames, so this is `{}` and the
+          // reducer's per-function merge leaves the user's own untouched.
+          varRenames: data.varRenames,
           // Background sync: clears the redo branch (so a stale redo cannot
           // revert what just arrived) without consuming an undo slot.
           source: "mcp",

@@ -192,6 +192,7 @@ export default function App() {
       bookmarks: read.payload.bookmarks,
       renames: read.payload.renames,
       comments: read.payload.comments,
+      varRenames: read.payload.varRenames,
     });
   }, [annotationStorageKey, state.fileName]);
 
@@ -206,8 +207,16 @@ export default function App() {
       bookmarks: state.bookmarks,
       renames: state.renames,
       comments: state.comments,
+      varRenames: state.varRenames,
     });
-  }, [annotationStorageKey, state.fileName, state.bookmarks, state.renames, state.comments]);
+  }, [
+    annotationStorageKey,
+    state.fileName,
+    state.bookmarks,
+    state.renames,
+    state.comments,
+    state.varRenames,
+  ]);
 
   /**
    * The image this analysis chain has already been started for.

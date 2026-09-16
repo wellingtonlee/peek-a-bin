@@ -60,6 +60,40 @@ describe("undo/redo — basic round trips", () => {
     expect(thrice.renames).toEqual({});
   });
 
+  it("restores variable renames as one unit with the rest, and CLEAR is undoable too", () => {
+    const state = run([
+      { type: "RENAME_VARIABLE", funcAddr: 0x1000, name: "var_20", newName: "count" },
+      { type: "RENAME_FUNCTION", address: 0x1000, name: "main" },
+      { type: "CLEAR_VARIABLE_RENAME", funcAddr: 0x1000, name: "var_20" },
+    ]);
+    expect(state.varRenames).toEqual({});
+    expect(state.annotationUndoStack).toHaveLength(3);
+
+    // Undo the clear: the variable rename comes back, the function rename stays.
+    const once = appReducer(state, { type: "UNDO_ANNOTATION" });
+    expect(once.varRenames).toEqual({ 0x1000: { var_20: "count" } });
+    expect(once.renames).toEqual({ 0x1000: "main" });
+
+    const twice = appReducer(once, { type: "UNDO_ANNOTATION" });
+    expect(twice.renames).toEqual({});
+    expect(twice.varRenames).toEqual({ 0x1000: { var_20: "count" } });
+
+    const thrice = appReducer(twice, { type: "UNDO_ANNOTATION" });
+    expect(thrice.varRenames).toEqual({});
+
+    const redone = appReducer(thrice, { type: "REDO_ANNOTATION" });
+    expect(redone.varRenames).toEqual({ 0x1000: { var_20: "count" } });
+  });
+
+  it("a CLEAR_VARIABLE_RENAME that clears nothing spends no undo slot", () => {
+    const next = appReducer(initialState, {
+      type: "CLEAR_VARIABLE_RENAME",
+      funcAddr: 0x1000,
+      name: "var_20",
+    });
+    expect(next.annotationUndoStack).toEqual([]);
+  });
+
   it("walks a multi-step sequence back and forward again", () => {
     const state = run([
       { type: "RENAME_FUNCTION", address: 0x1000, name: "a" },
@@ -90,6 +124,10 @@ describe("undo/redo — basic round trips", () => {
       { label: "CLEAR_RENAME", action: { type: "CLEAR_RENAME", address: 0x1000 } },
       { label: "SET_COMMENT", action: { type: "SET_COMMENT", address: 0x1000, text: "c" } },
       { label: "DELETE_COMMENT", action: { type: "DELETE_COMMENT", address: 0x1000 } },
+      {
+        label: "RENAME_VARIABLE",
+        action: { type: "RENAME_VARIABLE", funcAddr: 0x1000, name: "var_20", newName: "n" },
+      },
     ];
     for (const { label, action } of cases) {
       const next = appReducer(initialState, action);
@@ -246,6 +284,7 @@ describe("undo/redo — actions that bypass the stack", () => {
       bookmarks: [{ address: 1, label: "" }],
       renames: { 1: "x" },
       comments: {},
+      varRenames: {},
     });
     // Restoring saved state on file open is not a user edit, so it is not undoable.
     expect(loaded.annotationUndoStack).toEqual([]);
@@ -257,6 +296,7 @@ describe("undo/redo — actions that bypass the stack", () => {
       bookmarks: [{ address: 1, label: "" }],
       renames: { 1: "x" },
       comments: {},
+      varRenames: {},
       hexPatches: new Map(),
     });
     expect(imported.annotationUndoStack).toHaveLength(1);
@@ -280,6 +320,7 @@ describe("undo/redo — actions that bypass the stack", () => {
       bookmarks: [{ address: 1, label: "" }],
       renames: { 1: "imported" },
       comments: {},
+      varRenames: {},
       source: "user",
     });
     expect(imported.annotationUndoStack).toHaveLength(1);
@@ -296,6 +337,7 @@ describe("undo/redo — actions that bypass the stack", () => {
       bookmarks: [],
       renames: { 1: "imported" },
       comments: {},
+      varRenames: {},
     });
     // Defaulting this way can only over-record history, never lose it.
     expect(imported.annotationUndoStack).toHaveLength(1);
@@ -314,6 +356,7 @@ describe("undo/redo — actions that bypass the stack", () => {
           bookmarks: [],
           renames: { [0x2000 + i]: `remote${i}` },
           comments: {},
+          varRenames: {},
           source: "mcp",
         }),
       ),
@@ -340,6 +383,7 @@ describe("undo/redo — actions that bypass the stack", () => {
       bookmarks: [],
       renames: { 0x2000: "from-import" },
       comments: {},
+      varRenames: {},
       source,
     });
     expect(imported.renames).toEqual({ 0x2000: "from-import" });

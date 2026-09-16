@@ -14,7 +14,13 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { type ExportSchemaV1, validateImport } from "../../utils/exportSchema";
+import { type AppState, initialState } from "../../hooks/usePEFile";
+import {
+  type ExportSchemaV1,
+  serializeState,
+  validateImport,
+  validateVarRenames,
+} from "../../utils/exportSchema";
 import { captureTools, stubSession, textOf } from "./harness";
 
 const valid: ExportSchemaV1 = {
@@ -73,6 +79,54 @@ describe("validateImport — accepted", () => {
         ]),
       ),
     ).not.toBeNull();
+  });
+});
+
+describe("validateImport — optional variable renames (peek-a-bin-5b6q.7)", () => {
+  it("accepts a document with no varRenames at all — every file written before the field", () => {
+    const result = validateImport(structuredClone(valid));
+    expect(result).not.toBeNull();
+    expect(result?.varRenames).toBeUndefined();
+  });
+
+  it("accepts a well-formed varRenames map, keyed by function address as a string", () => {
+    const result = validateImport(
+      withField("varRenames", { "4198400": { var_20: "count", arg_0: "ctx" } }),
+    );
+    expect(result?.varRenames).toEqual({ "4198400": { var_20: "count", arg_0: "ctx" } });
+    // The numeric keys the reducer wants come back from the same validator.
+    expect(validateVarRenames(result?.varRenames)).toEqual({
+      4198400: { var_20: "count", arg_0: "ctx" },
+    });
+  });
+
+  it.each([
+    ["an array", []],
+    ["a string", "var_20=count"],
+    ["a non-numeric function key", { sub_401000: { var_20: "x" } }],
+    ["an inner array", { "1": ["x"] }],
+    ["a non-string new name", { "1": { var_20: 1 } }],
+  ])("rejects varRenames that is %s", (_label, value) => {
+    expect(validateImport(withField("varRenames", value))).toBeNull();
+  });
+
+  it("round-trips through serializeState with NO version bump", () => {
+    const state: AppState = {
+      ...initialState,
+      fileName: "sample.exe",
+      varRenames: { 0x401000: { var_20: "count" }, 0x402000: { arg_0: "ctx" } },
+    };
+    const doc = serializeState(state);
+    expect(doc.version).toBe(1);
+    expect(doc.varRenames).toEqual({ "4198400": { var_20: "count" }, "4202496": { arg_0: "ctx" } });
+    const back = validateImport(JSON.parse(JSON.stringify(doc)));
+    expect(back).not.toBeNull();
+    expect(validateVarRenames(back?.varRenames)).toEqual(state.varRenames);
+  });
+
+  it("omits the key entirely when there are no variable renames, as `functions` is omitted", () => {
+    const doc = serializeState({ ...initialState, fileName: "sample.exe" });
+    expect("varRenames" in doc).toBe(false);
   });
 });
 

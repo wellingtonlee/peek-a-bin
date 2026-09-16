@@ -30,6 +30,7 @@ describe("parseAnnotationMessage — accepts well-formed frames", () => {
       bookmarks: [{ address: 0x401000, label: "entry" }],
       renames: { 4198400: "main" },
       comments: { 4198400: "start here" },
+      varRenames: {},
     });
   });
 
@@ -41,7 +42,7 @@ describe("parseAnnotationMessage — accepts well-formed frames", () => {
 
   it("fills in the sections the frame omits", () => {
     const result = parseAnnotationMessage(frame({ renames: { "1": "a" } }), FILE);
-    expect(result).toEqual({ bookmarks: [], renames: { 1: "a" }, comments: {} });
+    expect(result).toEqual({ bookmarks: [], renames: { 1: "a" }, comments: {}, varRenames: {} });
   });
 
   it("accepts a frame with no annotations at all", () => {
@@ -49,7 +50,17 @@ describe("parseAnnotationMessage — accepts well-formed frames", () => {
       bookmarks: [],
       renames: {},
       comments: {},
+      varRenames: {},
     });
+  });
+
+  it("validates a frame without variable renames — every frame the bridge sends — to `{}`", () => {
+    // The bridge's `AnalyzedFile` has no variable-rename slot, so no frame ever
+    // carries one; `{}` is what the reducer's per-function merge treats as a
+    // no-op, which is what keeps a background sync from wiping local renames
+    // (asserted at the reducer in `appReducer.test.ts`).
+    const result = parseAnnotationMessage(frame({ renames: { "1": "a" } }), FILE);
+    expect(result?.varRenames).toEqual({});
   });
 
   it("accepts a Buffer-like payload, as ws delivers for binary frames", () => {

@@ -285,6 +285,171 @@ describe("appReducer — renames and comments", () => {
   });
 });
 
+describe("appReducer — variable renames", () => {
+  const F = 0x401000;
+
+  it("RENAME_VARIABLE and CLEAR_VARIABLE_RENAME round-trip", () => {
+    const named = appReducer(initialState, {
+      type: "RENAME_VARIABLE",
+      funcAddr: F,
+      name: "var_20",
+      newName: "count",
+    });
+    expect(named.varRenames).toEqual({ [F]: { var_20: "count" } });
+    const cleared = appReducer(named, {
+      type: "CLEAR_VARIABLE_RENAME",
+      funcAddr: F,
+      name: "var_20",
+    });
+    expect(cleared.varRenames).toEqual({});
+  });
+
+  it("RENAME_VARIABLE replaces the inner record rather than writing into it", () => {
+    // The undo snapshot holds the previous inner object by reference; a write
+    // into it would rewrite history retroactively.
+    const first = appReducer(initialState, {
+      type: "RENAME_VARIABLE",
+      funcAddr: F,
+      name: "var_20",
+      newName: "count",
+    });
+    const inner = first.varRenames[F];
+    const second = appReducer(first, {
+      type: "RENAME_VARIABLE",
+      funcAddr: F,
+      name: "arg_0",
+      newName: "handle",
+    });
+    expect(inner).toEqual({ var_20: "count" });
+    expect(second.varRenames[F]).toEqual({ var_20: "count", arg_0: "handle" });
+    expect(second.varRenames[F]).not.toBe(inner);
+    expect(second.varRenames).not.toBe(first.varRenames);
+  });
+
+  it("renaming the same variable twice overwrites", () => {
+    const state = run([
+      { type: "RENAME_VARIABLE", funcAddr: F, name: "var_20", newName: "a" },
+      { type: "RENAME_VARIABLE", funcAddr: F, name: "var_20", newName: "b" },
+    ]);
+    expect(state.varRenames).toEqual({ [F]: { var_20: "b" } });
+  });
+
+  it("keeps two functions' records apart", () => {
+    const state = run([
+      { type: "RENAME_VARIABLE", funcAddr: F, name: "var_20", newName: "a" },
+      { type: "RENAME_VARIABLE", funcAddr: 0x402000, name: "var_20", newName: "b" },
+    ]);
+    expect(state.varRenames).toEqual({ [F]: { var_20: "a" }, 0x402000: { var_20: "b" } });
+  });
+
+  it("CLEAR_VARIABLE_RENAME drops only the named entry while siblings remain", () => {
+    const state = run([
+      { type: "RENAME_VARIABLE", funcAddr: F, name: "var_20", newName: "a" },
+      { type: "RENAME_VARIABLE", funcAddr: F, name: "var_24", newName: "b" },
+      { type: "CLEAR_VARIABLE_RENAME", funcAddr: F, name: "var_20" },
+    ]);
+    expect(state.varRenames).toEqual({ [F]: { var_24: "b" } });
+  });
+
+  it("CLEAR_VARIABLE_RENAME removes the function's key with its last entry", () => {
+    const state = run([
+      { type: "RENAME_VARIABLE", funcAddr: F, name: "var_20", newName: "a" },
+      { type: "RENAME_VARIABLE", funcAddr: 0x402000, name: "var_20", newName: "b" },
+      { type: "CLEAR_VARIABLE_RENAME", funcAddr: F, name: "var_20" },
+    ]);
+    expect(Object.keys(state.varRenames)).toEqual([String(0x402000)]);
+    expect(F in state.varRenames).toBe(false);
+  });
+
+  it("CLEAR_VARIABLE_RENAME on an absent key returns the SAME state object", () => {
+    // The suite's same-reference no-op invariant — and no undo slot is spent.
+    expect(
+      appReducer(initialState, { type: "CLEAR_VARIABLE_RENAME", funcAddr: F, name: "var_20" }),
+    ).toBe(initialState);
+    const named = appReducer(initialState, {
+      type: "RENAME_VARIABLE",
+      funcAddr: F,
+      name: "var_20",
+      newName: "a",
+    });
+    expect(appReducer(named, { type: "CLEAR_VARIABLE_RENAME", funcAddr: F, name: "var_24" })).toBe(
+      named,
+    );
+  });
+
+  it("RESET drops them with the file", () => {
+    const state = run([
+      { type: "RENAME_VARIABLE", funcAddr: F, name: "var_20", newName: "a" },
+      { type: "RESET" },
+    ]);
+    expect(state.varRenames).toEqual({});
+  });
+
+  it("LOAD_PERSISTED replaces them wholesale", () => {
+    const state = run([
+      { type: "RENAME_VARIABLE", funcAddr: F, name: "var_20", newName: "a" },
+      {
+        type: "LOAD_PERSISTED",
+        bookmarks: [],
+        renames: {},
+        comments: {},
+        varRenames: { 0x402000: { arg_0: "ctx" } },
+      },
+    ]);
+    expect(state.varRenames).toEqual({ 0x402000: { arg_0: "ctx" } });
+  });
+
+  it("IMPORT_ANNOTATIONS merges per function, the import winning on a shared key", () => {
+    const state = run([
+      { type: "RENAME_VARIABLE", funcAddr: F, name: "var_20", newName: "local" },
+      { type: "RENAME_VARIABLE", funcAddr: F, name: "var_24", newName: "kept" },
+      {
+        type: "IMPORT_ANNOTATIONS",
+        bookmarks: [],
+        renames: {},
+        comments: {},
+        varRenames: { [F]: { var_20: "imported" }, 0x402000: { arg_0: "ctx" } },
+      },
+    ]);
+    expect(state.varRenames).toEqual({
+      [F]: { var_20: "imported", var_24: "kept" },
+      0x402000: { arg_0: "ctx" },
+    });
+  });
+
+  it("IMPORT_FULL_ANALYSIS merges the same way", () => {
+    const state = run([
+      { type: "RENAME_VARIABLE", funcAddr: F, name: "var_20", newName: "local" },
+      {
+        type: "IMPORT_FULL_ANALYSIS",
+        bookmarks: [],
+        renames: {},
+        comments: {},
+        varRenames: { [F]: { arg_0: "ctx" } },
+        hexPatches: new Map(),
+      },
+    ]);
+    expect(state.varRenames).toEqual({ [F]: { var_20: "local", arg_0: "ctx" } });
+  });
+
+  it("an MCP sync frame — which never carries variable renames — cannot wipe the local ones", () => {
+    // `useMcpSync` validates every frame to a payload whose `varRenames` is `{}`;
+    // the merge must read that as "nothing to add", never as "replace with none".
+    const local = run([{ type: "RENAME_VARIABLE", funcAddr: F, name: "var_20", newName: "count" }]);
+    const synced = appReducer(local, {
+      type: "IMPORT_ANNOTATIONS",
+      bookmarks: [],
+      renames: { 0x402000: "remote" },
+      comments: {},
+      varRenames: {},
+      source: "mcp",
+    });
+    expect(synced.varRenames).toEqual({ [F]: { var_20: "count" } });
+    // The identity, exactly: no fresh object for an empty merge.
+    expect(synced.varRenames).toBe(local.varRenames);
+  });
+});
+
 describe("appReducer — annotation import and persistence", () => {
   it("LOAD_PERSISTED replaces annotations wholesale", () => {
     const dirty = run([
@@ -296,6 +461,7 @@ describe("appReducer — annotation import and persistence", () => {
       bookmarks: [{ address: 0x9000, label: "persisted" }],
       renames: { 0x9000: "restored" },
       comments: { 0x9000: "note" },
+      varRenames: {},
     });
     expect(loaded.bookmarks).toEqual([{ address: 0x9000, label: "persisted" }]);
     expect(loaded.renames).toEqual({ 0x9000: "restored" });
@@ -315,6 +481,7 @@ describe("appReducer — annotation import and persistence", () => {
       ],
       renames: { 0x1000: "imported", 0x2000: "other" },
       comments: { 0x2000: "hi" },
+      varRenames: {},
     });
 
     // Bookmark at an address we already have is skipped, so the local label survives.
@@ -334,6 +501,7 @@ describe("appReducer — annotation import and persistence", () => {
       bookmarks: [],
       renames: {},
       comments: {},
+      varRenames: {},
       hexPatches: new Map([[0x20, 0xcc]]),
     });
     expect([...merged.hexPatches.entries()].sort()).toEqual([
@@ -349,6 +517,7 @@ describe("appReducer — annotation import and persistence", () => {
       bookmarks: [],
       renames: {},
       comments: {},
+      varRenames: {},
       hexPatches: new Map([[0x10, 0xcc]]),
     });
     expect(merged.hexPatches.get(0x10)).toBe(0xcc);
@@ -760,6 +929,7 @@ describe("appReducer — no branch mutates its input", () => {
     { type: "SET_COMMENT", address: 0x401000, text: "entry" },
     { type: "PATCH_BYTE", offset: 0, value: 0x90 },
     { type: "PUSH_CALL_STACK", address: 0x402000, name: "callee" },
+    { type: "RENAME_VARIABLE", funcAddr: 0x401000, name: "var_20", newName: "count" },
   ]);
 
   const actions: AppAction[] = [
@@ -777,18 +947,22 @@ describe("appReducer — no branch mutates its input", () => {
     { type: "CLEAR_RENAME", address: 0x401000 },
     { type: "SET_COMMENT", address: 0x404000, text: "c" },
     { type: "DELETE_COMMENT", address: 0x401000 },
-    { type: "LOAD_PERSISTED", bookmarks: [], renames: {}, comments: {} },
+    { type: "RENAME_VARIABLE", funcAddr: 0x401000, name: "arg_0", newName: "ctx" },
+    { type: "CLEAR_VARIABLE_RENAME", funcAddr: 0x401000, name: "var_20" },
+    { type: "LOAD_PERSISTED", bookmarks: [], renames: {}, comments: {}, varRenames: {} },
     {
       type: "IMPORT_ANNOTATIONS",
       bookmarks: [{ address: 9, label: "" }],
       renames: { 9: "n" },
       comments: {},
+      varRenames: {},
     },
     {
       type: "IMPORT_FULL_ANALYSIS",
       bookmarks: [],
       renames: {},
       comments: {},
+      varRenames: {},
       hexPatches: new Map([[1, 2]]),
     },
     { type: "PATCH_BYTE", offset: 1, value: 1 },

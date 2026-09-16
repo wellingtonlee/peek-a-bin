@@ -9,7 +9,7 @@ import {
   VIEW_TABS,
   type ViewTab,
 } from "../hooks/usePEFile";
-import { serializeState, validateImport } from "../utils/exportSchema";
+import { serializeState, validateImport, validateVarRenames } from "../utils/exportSchema";
 import { fuzzyMatch } from "../utils/fuzzyMatch";
 import { VIEW_TAB_LABELS } from "./analysisNotice";
 import { focusOnMount } from "./focusOnMount";
@@ -454,6 +454,9 @@ export function AddressBar() {
               bookmarks: validated.bookmarks,
               renames,
               comments,
+              // `validateImport` has already accepted the shape; this call is
+              // what gives the numeric keys back. Absent in an older file.
+              varRenames: validateVarRenames(validated.varRenames ?? {}) ?? {},
               hexPatches,
             });
           } else if (
@@ -468,7 +471,8 @@ export function AddressBar() {
               data.renames && typeof data.renames === "object" ? data.renames : {};
             const comments: Record<number, string> =
               data.comments && typeof data.comments === "object" ? data.comments : {};
-            dispatch({ type: "IMPORT_ANNOTATIONS", bookmarks, renames, comments });
+            // The legacy format predates variable renames, so it carries none.
+            dispatch({ type: "IMPORT_ANNOTATIONS", bookmarks, renames, comments, varRenames: {} });
           } else {
             alert("Invalid analysis file format.");
           }

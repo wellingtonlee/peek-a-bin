@@ -239,6 +239,15 @@ Import annotations from an ExportSchemaV1 JSON file, merging into the current se
 | `fileId` | string | Yes | ID of the loaded PE file |
 | `inputPath` | string | Yes | Path to ExportSchemaV1 JSON file |
 
+**Variable renames are NOT imported.** An ExportSchemaV1 file written by the browser since
+peek-a-bin-5b6q.7 may carry an optional `varRenames` map (`funcAddr → generated name → new name`,
+the Low Level panel's per-function variable renames). `validateImport` accepts the shape, but the
+server's `AnalyzedFile` has no slot for it, so `import_analysis` applies bookmarks, renames and
+comments and leaves `varRenames` unread — and `decompile_function` therefore emits the generated
+names (`var_20`, `arg_1`) rather than the user's. Said here rather than silently dropped; carrying
+them would mean a store on `AnalyzedFile`, a `userNames` argument on the tool's `decompileFunction`
+call and a sync frame that today never contains them.
+
 ## Resources Reference
 
 PE file data is exposed as MCP resources using the URI template `pe://{fileId}/<resource>`:

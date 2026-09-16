@@ -12,6 +12,14 @@ export interface ExportSchemaV1 {
   comments: Record<string, string>;
   hexPatches: [number, number][];
   functions?: { address: number; name: string; size: number }[];
+  /**
+   * Per-function variable renames, `funcAddr → generated name → new name`
+   * (`AppState.varRenames`). OPTIONAL and no version bump, on the `functions?`
+   * precedent above: validated only when present, so a file from before the
+   * field imports as it always did and an older build ignores the key
+   * (peek-a-bin-5b6q.7). Keys are strings here because JSON's are.
+   */
+  varRenames?: Record<string, Record<string, string>>;
 }
 
 export function serializeState(state: AppState): ExportSchemaV1 {
@@ -36,6 +44,11 @@ export function serializeState(state: AppState): ExportSchemaV1 {
       name: f.name,
       size: f.size,
     }));
+  }
+
+  // Written only when there is something to write, as `functions` is.
+  if (Object.keys(state.varRenames).length > 0) {
+    result.varRenames = state.varRenames as Record<string, Record<string, string>>;
   }
 
   return result;
@@ -86,6 +99,12 @@ export function validateImport(data: unknown): ExportSchemaV1 | null {
       )
         return null;
     }
+  }
+
+  // Validate optional variable renames — the same rule the annotation payload
+  // applies, so a file and a localStorage record cannot disagree about shape.
+  if ("varRenames" in obj && obj.varRenames !== undefined) {
+    if (validateVarRenames(obj.varRenames) === null) return null;
   }
 
   return data as ExportSchemaV1;
@@ -282,11 +301,13 @@ export function generateMarkdownReport(state: AppState): string {
   return lines.join("\n");
 }
 
-/** Bookmarks/renames/comments as accepted from an untrusted source. */
+/** Bookmarks/renames/comments/variable renames as accepted from an untrusted source. */
 export interface AnnotationPayload {
   bookmarks: { address: number; label: string }[];
   renames: Record<number, string>;
   comments: Record<number, string>;
+  /** `funcAddr → generated name → new name`; `{}` when the source carried none. */
+  varRenames: Record<number, Record<string, string>>;
 }
 
 function validateAddressMap(value: unknown): Record<number, string> | null {
@@ -297,6 +318,33 @@ function validateAddressMap(value: unknown): Record<number, string> | null {
     if (!Number.isFinite(addr)) return null;
     if (typeof v !== "string") return null;
     out[addr] = v;
+  }
+  return out;
+}
+
+/**
+ * The variable-rename map from an untrusted source, or null for a wrong shape.
+ *
+ * Outer keys are coerced with `validateAddressMap`'s rule (`Number`, finite);
+ * an inner record must be a non-array object whose every value is a string —
+ * the KEY is not validated against `renameableIdentClass` here, because that
+ * rule is the pipeline's (`applyUserNames` skips what it does not admit) and a
+ * validator that duplicated it would be the second copy this repo refuses.
+ * Exported for the import path, which needs the numeric keys back.
+ */
+export function validateVarRenames(value: unknown): Record<number, Record<string, string>> | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const out: Record<number, Record<string, string>> = {};
+  for (const [k, inner] of Object.entries(value)) {
+    const addr = Number(k);
+    if (!Number.isFinite(addr)) return null;
+    if (typeof inner !== "object" || inner === null || Array.isArray(inner)) return null;
+    const names: Record<string, string> = {};
+    for (const [name, newName] of Object.entries(inner)) {
+      if (typeof newName !== "string") return null;
+      names[name] = newName;
+    }
+    out[addr] = names;
   }
   return out;
 }
@@ -330,6 +378,11 @@ export function validateAnnotations(data: unknown): AnnotationPayload | null {
   if (renames === null) return null;
   const comments = obj.comments === undefined ? {} : validateAddressMap(obj.comments);
   if (comments === null) return null;
+  // Absent means none — every record written before the field, and every
+  // MCP frame (the bridge carries no variable renames), reads as `{}`, which
+  // the reducer merges as a no-op.
+  const varRenames = obj.varRenames === undefined ? {} : validateVarRenames(obj.varRenames);
+  if (varRenames === null) return null;
 
-  return { bookmarks, renames, comments };
+  return { bookmarks, renames, comments, varRenames };
 }

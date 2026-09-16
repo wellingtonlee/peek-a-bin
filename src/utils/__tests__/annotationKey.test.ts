@@ -245,12 +245,14 @@ describe("loadAnnotations — the migration, and what it must not touch", () => 
       bookmarks: [{ address: 0x1000, label: "v1 only" }],
       renames: {},
       comments: {},
+      varRenames: {},
     });
     saveAnnotations(store, k2, {
       fileName: "setup.exe",
       bookmarks: [],
       renames: {},
       comments: {},
+      varRenames: {},
     });
 
     expect(loadAnnotations(store, k1, "setup.exe")?.payload.bookmarks).toEqual([

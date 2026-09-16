@@ -27,7 +27,33 @@ describe("validateAnnotations", () => {
 
   it("defaults missing sections rather than rejecting", () => {
     const result = validateAnnotations({});
-    expect(result).toEqual({ bookmarks: [], renames: {}, comments: {} });
+    expect(result).toEqual({ bookmarks: [], renames: {}, comments: {}, varRenames: {} });
+  });
+
+  it("accepts variable renames and coerces the function key to a number", () => {
+    const result = validateAnnotations({
+      varRenames: { "4198400": { var_20: "count", arg_0: "ctx" } },
+    });
+    expect(result?.varRenames).toEqual({ 4198400: { var_20: "count", arg_0: "ctx" } });
+    expect(Object.keys(result?.varRenames ?? {})).toEqual(["4198400"]);
+  });
+
+  it("does not judge the KEY of a variable rename — that is the pipeline's rule", () => {
+    // `applyUserNames` skips a key it does not admit; a validator that also
+    // refused it would be a second copy of `renameableIdentClass`.
+    expect(validateAnnotations({ varRenames: { "1": { anything: "x" } } })).not.toBeNull();
+  });
+
+  it.each([
+    ["variable renames as an array", { varRenames: [] }],
+    ["variable renames as a string", { varRenames: "var_20=count" }],
+    ["a non-numeric function key", { varRenames: { sub_401000: { var_20: "x" } } }],
+    ["an inner record that is an array", { varRenames: { "1": ["var_20", "x"] } }],
+    ["an inner record that is a string", { varRenames: { "1": "count" } }],
+    ["a non-string new name", { varRenames: { "1": { var_20: 5 } } }],
+    ["a null new name", { varRenames: { "1": { var_20: null } } }],
+  ])("rejects %s", (_label, input) => {
+    expect(validateAnnotations(input)).toBeNull();
   });
 
   it.each([

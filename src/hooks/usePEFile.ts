@@ -47,10 +47,20 @@ export interface Bookmark {
   label: string;
 }
 
+/**
+ * The user's variable names, per function: `funcAddr → generated name → new
+ * name`. The key is the name the pipeline PRINTED (`var_20`, `arg_1`, `hFile`),
+ * which is stable across sessions for exactly the classes
+ * `renameableIdentClass` admits; the rename is applied in the decompiler
+ * pipeline (`applyUserNames`), never by substituting text (peek-a-bin-5b6q.7).
+ */
+export type VarRenames = Record<number, Record<string, string>>;
+
 export interface AnnotationSnapshot {
   bookmarks: Bookmark[];
   renames: Record<number, string>;
   comments: Record<number, string>;
+  varRenames: VarRenames;
 }
 
 export type AnalysisPhase =
@@ -140,6 +150,8 @@ export interface AppState {
   bookmarks: Bookmark[];
   renames: Record<number, string>;
   comments: Record<number, string>;
+  /** See `VarRenames`. An annotation: persisted, exported, undoable. */
+  varRenames: VarRenames;
   hexPatches: Map<number, number>;
   annotationUndoStack: AnnotationSnapshot[];
   annotationRedoStack: AnnotationSnapshot[];
@@ -193,11 +205,20 @@ export type AppAction =
   | { type: "CLEAR_RENAME"; address: number }
   | { type: "SET_COMMENT"; address: number; text: string }
   | { type: "DELETE_COMMENT"; address: number }
+  // `name` is the GENERATED name the user renamed (`var_20`), `newName` what
+  // they typed. A clear with a name this function never had is a no-op.
+  | { type: "RENAME_VARIABLE"; funcAddr: number; name: string; newName: string }
+  | { type: "CLEAR_VARIABLE_RENAME"; funcAddr: number; name: string }
+  // `varRenames` is REQUIRED on the three loaders below, not optional: the
+  // callers are the persistence, import and MCP paths, and an optional field
+  // is one a caller forgets — which then silently drops every variable rename
+  // on load. A required field fails to compile instead.
   | {
       type: "LOAD_PERSISTED";
       bookmarks: Bookmark[];
       renames: Record<number, string>;
       comments: Record<number, string>;
+      varRenames: VarRenames;
     }
   // `source` splits the two very different callers of this action. Omitting it
   // means "user": that direction can only over-record history, never lose it.
@@ -206,6 +227,7 @@ export type AppAction =
       bookmarks: Bookmark[];
       renames: Record<number, string>;
       comments: Record<number, string>;
+      varRenames: VarRenames;
       source?: "user" | "mcp";
     }
   | {
@@ -213,6 +235,7 @@ export type AppAction =
       bookmarks: Bookmark[];
       renames: Record<number, string>;
       comments: Record<number, string>;
+      varRenames: VarRenames;
       hexPatches: Map<number, number>;
     }
   | { type: "PATCH_BYTE"; offset: number; value: number }
@@ -274,6 +297,7 @@ export const initialState: AppState = {
   bookmarks: [],
   renames: {},
   comments: {},
+  varRenames: {},
   hexPatches: new Map(),
   annotationUndoStack: [],
   annotationRedoStack: [],
@@ -296,7 +320,31 @@ const MAX_HISTORY = 50;
 const MAX_UNDO = 50;
 
 function snapshotAnnotations(state: AppState): AnnotationSnapshot {
-  return { bookmarks: state.bookmarks, renames: state.renames, comments: state.comments };
+  return {
+    bookmarks: state.bookmarks,
+    renames: state.renames,
+    comments: state.comments,
+    varRenames: state.varRenames,
+  };
+}
+
+/**
+ * Merge imported variable renames over the existing ones, per function: an
+ * imported name wins on a key both carry, a function only one side names is
+ * kept whole. Both records are REPLACED, never mutated (the undo snapshots hold
+ * direct references). An empty import is the identity, which is what makes an
+ * MCP sync frame — the bridge carries no variable renames — unable to wipe the
+ * user's own.
+ */
+function mergeVarRenames(existing: VarRenames, imported: VarRenames): VarRenames {
+  const entries = Object.entries(imported);
+  if (entries.length === 0) return existing;
+  const out: VarRenames = { ...existing };
+  for (const [addr, names] of entries) {
+    const key = Number(addr);
+    out[key] = { ...existing[key], ...names };
+  }
+  return out;
 }
 
 function pushUndo(state: AppState): Pick<AppState, "annotationUndoStack" | "annotationRedoStack"> {
@@ -417,12 +465,40 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       const { [action.address]: _, ...rest } = state.comments;
       return { ...state, ...undo, comments: rest };
     }
+    case "RENAME_VARIABLE": {
+      const undo = pushUndo(state);
+      // Both records replaced: the snapshot `pushUndo` just took holds the
+      // previous inner object by reference, so writing into it would rewrite
+      // history.
+      const inner = { ...state.varRenames[action.funcAddr], [action.name]: action.newName };
+      return { ...state, ...undo, varRenames: { ...state.varRenames, [action.funcAddr]: inner } };
+    }
+    case "CLEAR_VARIABLE_RENAME": {
+      const current = state.varRenames[action.funcAddr];
+      // The same-reference no-op: nothing to clear, so nothing changes and no
+      // undo slot is spent on it.
+      if (!current || !(action.name in current)) return state;
+      const undo = pushUndo(state);
+      const { [action.name]: _, ...restNames } = current;
+      if (Object.keys(restNames).length === 0) {
+        // The function's record is dropped with its last entry, so an emptied
+        // function does not linger as `{}` in every export and every save.
+        const { [action.funcAddr]: __, ...restFuncs } = state.varRenames;
+        return { ...state, ...undo, varRenames: restFuncs };
+      }
+      return {
+        ...state,
+        ...undo,
+        varRenames: { ...state.varRenames, [action.funcAddr]: restNames },
+      };
+    }
     case "LOAD_PERSISTED": {
       return {
         ...state,
         bookmarks: action.bookmarks,
         renames: action.renames,
         comments: action.comments,
+        varRenames: action.varRenames,
       };
     }
     case "IMPORT_ANNOTATIONS": {
@@ -449,6 +525,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         bookmarks: mergedBookmarks,
         renames: { ...state.renames, ...action.renames },
         comments: { ...state.comments, ...action.comments },
+        varRenames: mergeVarRenames(state.varRenames, action.varRenames),
       };
     }
     case "IMPORT_FULL_ANALYSIS": {
@@ -464,6 +541,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         bookmarks: mergedBookmarks,
         renames: { ...state.renames, ...action.renames },
         comments: { ...state.comments, ...action.comments },
+        varRenames: mergeVarRenames(state.varRenames, action.varRenames),
         hexPatches: new Map([...state.hexPatches, ...action.hexPatches]),
       };
     }
@@ -490,6 +568,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         bookmarks: snapshot.bookmarks,
         renames: snapshot.renames,
         comments: snapshot.comments,
+        varRenames: snapshot.varRenames,
         annotationUndoStack: stack,
         annotationRedoStack: redoStack,
       };
@@ -505,6 +584,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         bookmarks: snapshot.bookmarks,
         renames: snapshot.renames,
         comments: snapshot.comments,
+        varRenames: snapshot.varRenames,
         annotationUndoStack: undoStack,
         annotationRedoStack: stack,
       };
