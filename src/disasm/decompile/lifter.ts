@@ -3285,7 +3285,7 @@ function collectStackArgs64(
   callIdx: number,
   stmts: IRStmt[],
   slotReads: ReadonlySet<number> | undefined,
-): { args: IRExpr[]; dropAddrs: Set<number> } | null {
+): { exprs: IRExpr[]; dropAddrs: Set<number> } | null {
   if (slotReads === undefined) return null;
   const insns = block.insns;
 
@@ -3330,7 +3330,7 @@ function collectStackArgs64(
     args.push(st.value);
     dropAddrs.add(store.addr);
   }
-  return args.length === 0 ? null : { args, dropAddrs };
+  return args.length === 0 ? null : { exprs: args, dropAddrs };
 }
 
 /**
@@ -3379,7 +3379,7 @@ function appendStackArgs64(
       stmts.splice(i, 1);
     }
   }
-  args.push(...extra.args);
+  args.push(...extra.exprs);
 }
 
 /**
