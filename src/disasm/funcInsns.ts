@@ -230,6 +230,36 @@ export function funcXrefEntries(
  * with or without the extent tie-break. `__tests__/funcInsns.test.ts` pins that
  * directly, over the full table and over its own output.
  */
+/**
+ * The `.pdata` record that describes THIS function's prolog — the one whose
+ * `beginAddress` is the function's entry — or `undefined`.
+ *
+ * A second selector beside {@link funcExceptionRecord}, for a different
+ * question: that one picks the record whose HANDLER applies (and so only among
+ * handler-bearing records), this one picks the record whose `x64Prolog`
+ * describes the function's own frame, handler or not. Same unit rule, same
+ * image-base recovery, same ambiguous-match discard, and the same reason it
+ * lives in this leaf: `disasmClient` sends the one row rather than the table,
+ * the worker re-applies the selector to what it receives, and the two agree
+ * because the rule is idempotent on its own output. A chained fragment's
+ * record begins inside the function and never at its entry, so it is not
+ * selected; a record with no decoded prolog is selected and answers nothing.
+ */
+export function funcPrologRecord(
+  func: FuncExtent,
+  runtimeFunctions: readonly RuntimeFunction[] | undefined,
+): RuntimeFunction | undefined {
+  if (!runtimeFunctions || runtimeFunctions.length === 0) return undefined;
+  const sameAddress = runtimeFunctions.filter((rf) => rf.beginAddress === func.address);
+  if (sameAddress.length > 0) return sameAddress[0];
+  const IMAGE_BASE_ALIGNMENT = 0x10000;
+  const congruent = runtimeFunctions.filter((rf) => {
+    const imageBase = func.address - rf.beginAddress;
+    return imageBase > 0 && imageBase % IMAGE_BASE_ALIGNMENT === 0;
+  });
+  return congruent.length === 1 ? congruent[0] : undefined;
+}
+
 export function funcExceptionRecord(
   func: FuncExtent,
   runtimeFunctions: readonly RuntimeFunction[] | undefined,

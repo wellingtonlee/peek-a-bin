@@ -155,6 +155,22 @@ export interface StackFrame {
    */
   spWritesAt: number[];
   /**
+   * Bytes the prologue's `sub`/`add <sp>, imm` NET allocated — the quantity an
+   * x64 `UNWIND_INFO`'s `UWOP_ALLOC_*` codes sum to, read off the same walk
+   * that produced `spWritesAt`. `null` when the walk read no prologue at all
+   * (`prologueEnd` is null too); 0 when it read one that allocates nothing.
+   *
+   * **Deliberately NOT `frameSize`**, which is a separate ten-instruction
+   * regex scan over the function's head and is 0 for every MSVC prologue longer
+   * than that — four functions per x64 corpus binary, each a large frame whose
+   * `sub rsp, 0x7a0` sits at index 10 behind a `mov rax, rsp`, three spills and
+   * five pushes. The agreement test in `decompile/pipeline.ts` compares the
+   * record against the reading the frame-scaffolding pass actually depends on,
+   * which is this one. `null` and `undefined` must read the same way, for
+   * `frameDelta`'s reason.
+   */
+  prologueAlloc: number | null;
+  /**
    * The addresses of the prologue stores that filled a home slot with its own
    * argument register — the instructions behind `homed` in
    * `inlineFrameGeometry`. Empty on x86 (no home space) and for every function

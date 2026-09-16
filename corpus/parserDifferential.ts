@@ -86,7 +86,7 @@ import { readFileSync } from "node:fs";
 import { basename } from "node:path";
 import { checksumFile, computeImphash } from "../src/pe/metadata";
 import { parsePE } from "../src/pe/parser";
-import type { PEFile } from "../src/pe/types";
+import type { PEFile, X64Prolog } from "../src/pe/types";
 import { ALL_BINS, resolveArmCorpus, resolveCorpus } from "./preflight";
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -160,6 +160,39 @@ export interface RefResourceEntry {
   size: number;
 }
 
+/**
+ * The PROLOG an x64 `UNWIND_INFO` describes, read from the spec a second time.
+ *
+ * Shaped exactly like the parser's own prolog record (`pe/types.ts`) so the two
+ * can be compared field by field — the type's NAME is deliberately not written
+ * here, because `build/parserIndependence.test.ts` scrapes this region for any
+ * binding imported from `src/` and a mention in a comment is a mention. The
+ * reading below is deliberately a different SHAPE from
+ * `pdata.ts`'s: that one walks the codes with a `switch` that both consumes
+ * operands and advances the cursor, this one splits the walk in two — a table
+ * of node counts decides how far each code reaches, and a second pass over the
+ * grouped nodes interprets them. A slot-count error, which is the failure mode
+ * that produces a plausible wrong `allocBytes`, therefore cannot be shared by
+ * construction.
+ *
+ * The REFUSALS are shared, and that is stated rather than hidden: both readers
+ * decline a chained record and any op outside the nine they decode, so the
+ * differential says nothing about whether those refusals are the right ones —
+ * `src/pe/__tests__/pdata.test.ts` is where that is pinned. What it does say is
+ * that every record both readers DID decode was decoded the same way, and the
+ * report carries the two populations so a refusal rate cannot drift unnoticed.
+ */
+export interface RefProlog {
+  prologSize: number;
+  frameRegister: string | null;
+  frameOffset: number;
+  allocBytes: number;
+  pushedNonvol: string[];
+  savedNonvol: { reg: string; offset: number }[];
+  savedXmm: { reg: string; offset: number }[];
+  machineFrame: boolean;
+}
+
 export interface RefPdata {
   begin: number;
   end: number;
@@ -167,6 +200,8 @@ export interface RefPdata {
   /** Undefined where the record's UNWIND_INFO version is not 1 or 2. */
   handlerFlags?: number;
   handlerAddress?: number;
+  /** Undefined where this reader refused the record's unwind codes. */
+  prolog?: RefProlog;
 }
 
 export interface RefRelocBlock {
@@ -477,6 +512,132 @@ function refResources(
 }
 
 /**
+ * One past the last byte of the raw data of the section holding `rva`, or `-1`.
+ *
+ * The parser bounds an `UNWIND_INFO` walk by the section rather than by the end
+ * of the file (`sectionRawLimitForRva`), so the reference has to apply the same
+ * bound or the two would disagree over a record whose codes run off `.xdata`
+ * into whatever follows it in the file. That is the bound reproduced, not the
+ * code: this is a linear scan of the reference's own section list.
+ */
+function refSectionRawLimit(rva: number, sections: readonly RefSection[]): number {
+  for (const s of sections) {
+    const extent = s.virtualSize > 0 ? s.virtualSize : s.sizeOfRawData;
+    if (rva >= s.virtualAddress && rva < s.virtualAddress + extent) {
+      return s.pointerToRawData + Math.min(s.virtualSize, s.sizeOfRawData);
+    }
+  }
+  return -1;
+}
+
+/**
+ * The x64 unwind register numbering. Spelled out rather than shared with the
+ * parser, which is the whole point of a differential.
+ */
+const REF_UNWIND_REGS = "rax rcx rdx rbx rsp rbp rsi rdi r8 r9 r10 r11 r12 r13 r14 r15".split(" ");
+
+/**
+ * How many two-byte `UNWIND_CODE` nodes each operation occupies, including its
+ * own. `null` is an operation this reader does not decode; `UWOP_ALLOC_LARGE`
+ * is a function of its op info and is answered separately.
+ */
+const REF_NODE_COUNT: (number | null)[] = [
+  1, // 0 UWOP_PUSH_NONVOL
+  -1, // 1 UWOP_ALLOC_LARGE: 2 when info is 0, 3 when it is 1
+  1, // 2 UWOP_ALLOC_SMALL
+  1, // 3 UWOP_SET_FPREG
+  2, // 4 UWOP_SAVE_NONVOL
+  3, // 5 UWOP_SAVE_NONVOL_FAR
+  null, // 6 deprecated UWOP_SAVE_XMM / v2 UWOP_EPILOG
+  null, // 7 deprecated UWOP_SAVE_XMM_FAR / v2 UWOP_SPARE_CODE
+  2, // 8 UWOP_SAVE_XMM128
+  3, // 9 UWOP_SAVE_XMM128_FAR
+  1, // 10 UWOP_PUSH_MACHFRAME
+  null,
+  null,
+  null,
+  null,
+  null,
+];
+
+/** See {@link RefProlog}. `undefined` is a refusal of the whole record. */
+function refProlog(
+  dv: DataView,
+  u: number,
+  flags: number,
+  sectionLimit: number,
+): RefProlog | undefined {
+  if (flags & 0x4) return undefined; // UNW_FLAG_CHAININFO
+  const limit = sectionLimit >= 0 ? Math.min(dv.byteLength, sectionLimit) : dv.byteLength;
+  if (u < 0 || u + 4 > limit) return undefined;
+  const count = dv.getUint8(u + 2);
+  const codesAt = u + 4;
+  if (codesAt + count * 2 > limit) return undefined;
+
+  // Pass one: group the nodes. Each entry is [op, info, ...operand slots].
+  const groups: number[][] = [];
+  for (let i = 0; i < count; ) {
+    const b = dv.getUint8(codesAt + i * 2 + 1);
+    const op = b & 0xf;
+    const info = b >>> 4;
+    let nodes = REF_NODE_COUNT[op];
+    if (nodes === null) return undefined;
+    if (nodes === -1) {
+      if (info > 1) return undefined;
+      nodes = info === 0 ? 2 : 3;
+    }
+    if (i + nodes > count) return undefined;
+    const operands: number[] = [];
+    for (let k = 1; k < nodes; k++) operands.push(dv.getUint16(codesAt + (i + k) * 2, true));
+    groups.push([op, info, ...operands]);
+    i += nodes;
+  }
+
+  // Pass two: interpret.
+  const out: RefProlog = {
+    prologSize: dv.getUint8(u + 1),
+    frameRegister: null,
+    frameOffset: 0,
+    allocBytes: 0,
+    pushedNonvol: [],
+    savedNonvol: [],
+    savedXmm: [],
+    machineFrame: false,
+  };
+  const frameByte = dv.getUint8(u + 3);
+  for (const [op, info, a, b] of groups) {
+    if (op === 0) {
+      if (info === 4) return undefined;
+      out.pushedNonvol.push(REF_UNWIND_REGS[info]);
+    } else if (op === 1) {
+      out.allocBytes += info === 0 ? a * 8 : a + b * 65536;
+    } else if (op === 2) {
+      out.allocBytes += 8 * (info + 1);
+    } else if (op === 3) {
+      const n = frameByte & 0xf;
+      if (n === 4) return undefined;
+      out.frameRegister = REF_UNWIND_REGS[n];
+      out.frameOffset = (frameByte >>> 4) * 16;
+    } else if (op === 4 || op === 5) {
+      if (info === 4) return undefined;
+      out.savedNonvol.push({
+        reg: REF_UNWIND_REGS[info],
+        offset: op === 4 ? a * 8 : a + b * 65536,
+      });
+    } else if (op === 8 || op === 9) {
+      out.savedXmm.push({
+        reg: `xmm${info}`,
+        offset: op === 8 ? a * 16 : a + b * 65536,
+      });
+    } else if (op === 10) {
+      if (info > 1) return undefined;
+      out.machineFrame = true;
+    }
+  }
+  return out;
+}
+
+/**
  * x64 `.pdata`: 12-byte RUNTIME_FUNCTION records of begin/end/unwind RVAs, plus
  * the handler the UNWIND_INFO names.
  *
@@ -522,6 +683,8 @@ function refPdata(
       if (version === 1 || version === 2) {
         const flags = (vf >> 3) & 0x1f;
         rec.handlerFlags = flags;
+        const prolog = refProlog(dv, u, flags, refSectionRawLimit(unwind, sections));
+        if (prolog) rec.prolog = prolog;
         // UNW_FLAG_EHANDLER | UNW_FLAG_UHANDLER, and not UNW_FLAG_CHAININFO
         // (0x4), which puts a RUNTIME_FUNCTION where the handler RVA would be.
         if (flags & 0x3 && !(flags & 0x4)) {
@@ -1251,6 +1414,24 @@ export function resourceSubject(ref: RefImage, pe: PEFile): Row[] {
 
 // ── 8. .pdata (x64 only) ────────────────────────────────────────────────────
 
+/** Field-by-field, as text, so one row names every disagreement it found. */
+function prologDiff(r: RefProlog, p: X64Prolog): string[] {
+  const out: string[] = [];
+  const same = (name: string, a: unknown, b: unknown) => {
+    if (JSON.stringify(a) !== JSON.stringify(b))
+      out.push(`${name} ${JSON.stringify(a)} vs ${JSON.stringify(b)}`);
+  };
+  same("prologSize", r.prologSize, p.prologSize);
+  same("frameRegister", r.frameRegister, p.frameRegister);
+  same("frameOffset", r.frameOffset, p.frameOffset);
+  same("allocBytes", r.allocBytes, p.allocBytes);
+  same("pushedNonvol", r.pushedNonvol, p.pushedNonvol);
+  same("savedNonvol", r.savedNonvol, p.savedNonvol);
+  same("savedXmm", r.savedXmm, p.savedXmm);
+  same("machineFrame", r.machineFrame, p.machineFrame);
+  return out;
+}
+
 export function pdataSubject(ref: RefImage, pe: PEFile): Row[] {
   // ARM64 is gated by `npm run corpus:arm64` against the sweep itself, which is
   // a stronger oracle than a second reader; PE32 has no exception directory.
@@ -1265,6 +1446,9 @@ export function pdataSubject(ref: RefImage, pe: PEFile): Row[] {
   }
   const n = Math.min(ref.pdata.length, parsed.length);
   let handlers = 0;
+  let prologsCompared = 0;
+  let prologsRefused = 0;
+  let framedPrologs = 0;
   for (let i = 0; i < n; i++) {
     const r = ref.pdata[i];
     const p = parsed[i];
@@ -1290,12 +1474,48 @@ export function pdataSubject(ref: RefImage, pe: PEFile): Row[] {
       );
     }
     if (r.handlerAddress !== undefined) handlers++;
+
+    // The PROLOG the unwind codes describe (peek-a-bin-5b6q.1). Both readers
+    // refuse the same records — a chained one, an op neither decodes — so the
+    // disagreement row is asked only where BOTH decoded something, and the two
+    // refusal counts are reported beside it so a silent divergence in what is
+    // refused shows up as a population change rather than as a green row.
+    if (r.prolog && p.x64Prolog) {
+      prologsCompared++;
+      const d = prologDiff(r.prolog, p.x64Prolog);
+      if (d.length > 0) {
+        mismatches++;
+        bad.push(`pdata ${i} (${hex(r.begin)}): prolog ${d.join("; ")}`);
+      }
+      if (p.x64Prolog.frameRegister !== null) framedPrologs++;
+    } else if (r.prolog !== undefined || p.x64Prolog !== undefined) {
+      mismatches++;
+      bad.push(
+        `pdata ${i} (${hex(r.begin)}): prolog decoded by ` +
+          `${r.prolog ? "reference only" : "parser only"}`,
+      );
+    } else {
+      prologsRefused++;
+    }
   }
 
   return [
     gate("pdata: x64 record disagreements", mismatches, `${n} records`, bad),
     liveness("x64 .pdata records", n),
+    liveness("x64 UNWIND_INFO prologs both readers decoded", prologsCompared),
     report("pdata: records naming an exception handler", handlers, `${n} records`),
+    // Both readers refuse a chained record and any undecoded op, so this is the
+    // population the differential is BLIND to, not a defect. A rise means a
+    // binary with unwind data neither reader vouches for.
+    report("pdata: UNWIND_INFO records both readers refuse", prologsRefused, `${n} records`),
+    // The `UWOP_SET_FPREG` population — the half of the prolog the
+    // frame-scaffolding pass's agreement test reads. 0 would mean the frame
+    // register is never exercised here.
+    report(
+      "pdata: prologs establishing a frame register",
+      framedPrologs,
+      `${prologsCompared} decoded`,
+    ),
     report("pdata: degenerate records both readers drop", ref.pdataDegenerate, `${n} kept`),
     // The two rows that say what this corpus does NOT exercise. Both are 0 on
     // t64 and w64, so `parsePdata`'s UNWIND_INFO version check and its

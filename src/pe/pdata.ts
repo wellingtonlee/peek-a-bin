@@ -6,7 +6,13 @@ import {
   type SectionIndex,
   sectionRawLimitForRva,
 } from "./parser";
-import type { DataDirectory, RuntimeFunction, ScopeTableEntry, SectionHeader } from "./types";
+import type {
+  DataDirectory,
+  RuntimeFunction,
+  ScopeTableEntry,
+  SectionHeader,
+  X64Prolog,
+} from "./types";
 
 /** UNWIND_INFO flag: the record carries an exception handler. */
 const UNW_FLAG_EHANDLER = 0x1;
@@ -389,6 +395,204 @@ function readScopeTable(
 }
 
 /**
+ * `UNWIND_CODE.UnwindOp` values. The x64 exception-handling format's own
+ * numbering; the two deprecated version-1 codes (6 `UWOP_SAVE_XMM`, 7
+ * `UWOP_SAVE_XMM_FAR`) and the version-2 pair that reuses their numbers
+ * (`UWOP_EPILOG`, `UWOP_SPARE_CODE`) are deliberately NOT here — see
+ * `readX64Prolog`.
+ */
+const UWOP_PUSH_NONVOL = 0;
+const UWOP_ALLOC_LARGE = 1;
+const UWOP_ALLOC_SMALL = 2;
+const UWOP_SET_FPREG = 3;
+const UWOP_SAVE_NONVOL = 4;
+const UWOP_SAVE_NONVOL_FAR = 5;
+const UWOP_SAVE_XMM128 = 8;
+const UWOP_SAVE_XMM128_FAR = 9;
+const UWOP_PUSH_MACHFRAME = 10;
+
+/** The x64 unwind format's register numbering, `OpInfo` → name. */
+const X64_UNWIND_REGS = [
+  "rax",
+  "rcx",
+  "rdx",
+  "rbx",
+  "rsp",
+  "rbp",
+  "rsi",
+  "rdi",
+  "r8",
+  "r9",
+  "r10",
+  "r11",
+  "r12",
+  "r13",
+  "r14",
+  "r15",
+] as const;
+
+/**
+ * Decode the prolog an x64 `UNWIND_INFO` describes, or answer `undefined`.
+ *
+ * `unwindOffset` is the record's file offset; the caller has already checked
+ * the version is 1 or 2 and read the flags. The header is four bytes —
+ * `version:3 | flags:5`, `SizeOfProlog`, `CountOfUnwindCodes`,
+ * `FrameRegister:4 | FrameOffset:4` — followed by `CountOfUnwindCodes` two-byte
+ * `UNWIND_CODE`s: `CodeOffset` (the prolog offset one past the instruction),
+ * then `UnwindOp:4 | OpInfo:4` in one byte, low nibble first. Some ops take one
+ * or two further slots for an operand, which is why the codes are walked rather
+ * than indexed.
+ *
+ * **Every refusal yields `undefined` for the whole record, never a partial
+ * prolog**, on `readScopeTable`'s reasoning: a caller cannot tell an `allocBytes`
+ * that stopped at an unknown code from a complete one, and this value's one
+ * consumer compares it for EQUALITY against `stack.ts`'s `frameSize`. Refused:
+ *
+ *  - **`UNW_FLAG_CHAININFO`.** A chained record describes a fragment whose
+ *    prolog belongs to another `RUNTIME_FUNCTION`; following the chain is a
+ *    walk this reader does not make, and the fragment's own codes describe no
+ *    prolog of its own. The bead asked for exactly this refusal.
+ *  - **Op codes 6 and 7 in either version.** In version 1 they are the
+ *    deprecated `UWOP_SAVE_XMM`/`UWOP_SAVE_XMM_FAR` no shipping compiler emits;
+ *    in version 2 they are `UWOP_EPILOG`/`UWOP_SPARE_CODE`, whose node counts
+ *    this project has not settled from a file (the corpus's two x64 binaries
+ *    carry no version-2 record — `corpus:parserdiff` reports the population)
+ *    and a wrong slot count would desynchronise every code after it into a
+ *    plausible wrong `allocBytes`. Refused rather than guessed, on the
+ *    "attacker-controlled bound" rule's neighbour: a wrong reading that looks
+ *    well-formed.
+ *  - **Any other op**, 11-15, which the format does not define.
+ *  - **Codes running past the containing section or the buffer.** `CountOfUnwindCodes`
+ *    is a file-supplied byte, so the walk is bounded at 255 slots by the format
+ *    itself; the section bound is still applied because the table's RVA can
+ *    point anywhere.
+ *  - **A register number naming RSP as a pushed/saved register.** The format
+ *    permits the encoding and no compiler emits it; a record that does is not
+ *    one this reader can vouch for.
+ *
+ * `frameRegister` is taken from the header only when a `UWOP_SET_FPREG` code
+ * is present: the header's `FrameRegister` field is meaningless without one
+ * (MSVC writes 0 there, which is RAX's number, not "none").
+ */
+function readX64Prolog(
+  view: DataView,
+  unwindOffset: number,
+  flags: number,
+  sectionLimit: number,
+): X64Prolog | undefined {
+  if (flags & UNW_FLAG_CHAININFO) return undefined;
+  const limit = Math.min(
+    view.byteLength,
+    sectionLimit >= 0 ? sectionLimit : Number.POSITIVE_INFINITY,
+  );
+  if (unwindOffset < 0 || unwindOffset + 4 > limit) return undefined;
+  const prologSize = view.getUint8(unwindOffset + 1);
+  const countOfCodes = view.getUint8(unwindOffset + 2);
+  const frameByte = view.getUint8(unwindOffset + 3);
+  const codesAt = unwindOffset + 4;
+  if (codesAt + countOfCodes * 2 > limit) return undefined;
+
+  const prolog: X64Prolog = {
+    prologSize,
+    frameRegister: null,
+    frameOffset: 0,
+    allocBytes: 0,
+    pushedNonvol: [],
+    savedNonvol: [],
+    savedXmm: [],
+    machineFrame: false,
+  };
+  const reg = (n: number): string | undefined => (n === 4 ? undefined : X64_UNWIND_REGS[n]);
+
+  for (let i = 0; i < countOfCodes; ) {
+    const opByte = view.getUint8(codesAt + i * 2 + 1);
+    const op = opByte & 0xf;
+    const info = opByte >> 4;
+    const slot = (k: number): number | undefined =>
+      i + k < countOfCodes ? view.getUint16(codesAt + (i + k) * 2, true) : undefined;
+    switch (op) {
+      case UWOP_PUSH_NONVOL: {
+        const r = reg(info);
+        if (r === undefined) return undefined;
+        prolog.pushedNonvol.push(r);
+        i += 1;
+        break;
+      }
+      case UWOP_ALLOC_LARGE: {
+        if (info === 0) {
+          const w = slot(1);
+          if (w === undefined) return undefined;
+          prolog.allocBytes += w * 8;
+          i += 2;
+        } else if (info === 1) {
+          const lo = slot(1);
+          const hi = slot(2);
+          if (lo === undefined || hi === undefined) return undefined;
+          prolog.allocBytes += lo + hi * 0x10000;
+          i += 3;
+        } else {
+          return undefined;
+        }
+        break;
+      }
+      case UWOP_ALLOC_SMALL:
+        prolog.allocBytes += info * 8 + 8;
+        i += 1;
+        break;
+      case UWOP_SET_FPREG: {
+        const r = reg(frameByte & 0xf);
+        if (r === undefined) return undefined;
+        prolog.frameRegister = r;
+        prolog.frameOffset = (frameByte >> 4) * 16;
+        i += 1;
+        break;
+      }
+      case UWOP_SAVE_NONVOL: {
+        const r = reg(info);
+        const w = slot(1);
+        if (r === undefined || w === undefined) return undefined;
+        prolog.savedNonvol.push({ reg: r, offset: w * 8 });
+        i += 2;
+        break;
+      }
+      case UWOP_SAVE_NONVOL_FAR: {
+        const r = reg(info);
+        const lo = slot(1);
+        const hi = slot(2);
+        if (r === undefined || lo === undefined || hi === undefined) return undefined;
+        prolog.savedNonvol.push({ reg: r, offset: lo + hi * 0x10000 });
+        i += 3;
+        break;
+      }
+      case UWOP_SAVE_XMM128: {
+        const w = slot(1);
+        if (w === undefined) return undefined;
+        prolog.savedXmm.push({ reg: `xmm${info}`, offset: w * 16 });
+        i += 2;
+        break;
+      }
+      case UWOP_SAVE_XMM128_FAR: {
+        const lo = slot(1);
+        const hi = slot(2);
+        if (lo === undefined || hi === undefined) return undefined;
+        prolog.savedXmm.push({ reg: `xmm${info}`, offset: lo + hi * 0x10000 });
+        i += 3;
+        break;
+      }
+      case UWOP_PUSH_MACHFRAME:
+        if (info > 1) return undefined;
+        prolog.machineFrame = true;
+        i += 1;
+        break;
+      default:
+        // 6 and 7 (deprecated in v1, EPILOG/SPARE_CODE in v2) and 11-15.
+        return undefined;
+    }
+  }
+  return prolog;
+}
+
+/**
  * x64 (and IA64) RUNTIME_FUNCTION: beginAddress (u32), endAddress (u32),
  * unwindInfoAddress (u32), all RVAs.
  */
@@ -434,6 +638,16 @@ function parseX64Pdata(
       if (version === 1 || version === 2) {
         const flags = (versionFlags >> 3) & 0x1f;
         rf.handlerFlags = flags;
+
+        // The prolog the codes describe — for every record, handler or not,
+        // and withheld whole on any refusal. See `readX64Prolog`.
+        const prolog = readX64Prolog(
+          view,
+          unwindOffset,
+          flags,
+          sectionRawLimitForRva(unwindInfoAddress, sectionIndex),
+        );
+        if (prolog) rf.x64Prolog = prolog;
 
         // UNW_FLAG_EHANDLER (0x1) or UNW_FLAG_UHANDLER (0x2), and not the
         // chained form, which puts a RUNTIME_FUNCTION where the handler RVA

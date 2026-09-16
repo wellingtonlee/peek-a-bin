@@ -290,9 +290,10 @@ export function analyzeArm64StackFrame(
     // See the module docstring: the one consumer of this field is decompiler
     // machinery that refuses on A64, so filling it would be unverifiable.
     frameEstablishedAt: null,
-    // Likewise: the four prologue facts are read off x86 instruction text by
+    // Likewise: the prologue facts are read off x86 instruction text by
     // `inlineFrameGeometry`, and `decompile/prologue.ts` declines on A64.
     prologueEnd: null,
+    prologueAlloc: null,
     spWritesAt: [],
     homedAt: [],
     spAliases: [],

@@ -136,6 +136,24 @@ export interface FrameStripReport {
   spReadsKept: KeptReason[];
   /** Reasons a frame-register read survived; empty when none did. */
   fpReadsKept: KeptReason[];
+  /**
+   * The x64 `UNWIND_INFO` and `stack.ts` disagreed about this prologue, so the
+   * pass was refused outright and deleted nothing — see `prologueAgrees` in
+   * `pipeline.ts`. Every other field is then its zero.
+   */
+  prologueDisagree: boolean;
+}
+
+/** The account of a function the pass refused whole. */
+export function refusedFrameStrip(framed: boolean): FrameStripReport {
+  return {
+    framed,
+    candidates: zeroShapes(),
+    deleted: zeroShapes(),
+    spReadsKept: [],
+    fpReadsKept: [],
+    prologueDisagree: true,
+  };
 }
 
 function zeroShapes(): Record<StripShape, number> {
@@ -582,6 +600,7 @@ export function stripFrameScaffolding(
     deleted,
     spReadsKept: [...spKept].sort(),
     fpReadsKept: [...fpKept].sort(),
+    prologueDisagree: false,
   });
 
   return body === func.body ? func : { ...func, body };

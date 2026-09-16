@@ -149,8 +149,8 @@ interface FrameGeometry {
   establishedAt: number | null;
   /**
    * The prologue's extent and its stack-pointer arithmetic — see
-   * `StackFrame.prologueEnd`, `spWritesAt`, `homedAt` and `spAliases`, which
-   * these four are published as verbatim. They are facts about the WALK rather
+   * `StackFrame.prologueEnd`, `spWritesAt`, `prologueAlloc`, `homedAt` and
+   * `spAliases`, which these five are published as verbatim. They are facts about the WALK rather
    * than about the frame register, so they are filled in on the refusal path
    * too: an x64 function under frame-pointer omission has no `delta` and still
    * has a `sub rsp, 0x28` whose address `decompile/prologue.ts` needs.
@@ -162,6 +162,8 @@ interface FrameGeometry {
 interface PrologueFacts {
   end: number | null;
   spWritesAt: number[];
+  /** Net bytes the extent's `sub`/`add <sp>, imm` allocated — `StackFrame.prologueAlloc`. */
+  alloc: number;
   homedAt: number[];
   spAliases: [string, number][];
 }
@@ -171,7 +173,7 @@ const NO_HOMED: ReadonlySet<number> = new Set<number>();
 
 /** Nothing was read: no extent, no arithmetic, no spill, no alias. */
 function noPrologue(): PrologueFacts {
-  return { end: null, spWritesAt: [], homedAt: [], spAliases: [] };
+  return { end: null, spWritesAt: [], alloc: 0, homedAt: [], spAliases: [] };
 }
 
 /**
@@ -422,7 +424,13 @@ function inlineFrameGeometry(insns: Instruction[], is64: boolean): FrameGeometry
       if (mn === "sub") spDelta -= imm;
       else if (mn === "add") spDelta += imm;
       else return stopHere();
-      if (extentOpen) prologue.spWritesAt.push(insn.address);
+      if (extentOpen) {
+        prologue.spWritesAt.push(insn.address);
+        // The quantity an `UNWIND_INFO`'s `UWOP_ALLOC_*` codes sum to. Signed
+        // the same way — an `add <sp>, imm` inside a prologue gives back what a
+        // `sub` took, and the record would describe the net.
+        prologue.alloc += mn === "sub" ? imm : -imm;
+      }
       extend(insn);
       continue;
     }
@@ -1148,6 +1156,9 @@ export function analyzeStackFrame(
     frameEstablishedAt: geometry.establishedAt,
     prologueEnd: geometry.prologue.end,
     spWritesAt: geometry.prologue.spWritesAt,
+    // `null` where the walk read no prologue extent, so a consumer cannot read
+    // "allocates nothing" out of "nothing was read" — `StackFrame`'s own rule.
+    prologueAlloc: geometry.prologue.end === null ? null : geometry.prologue.alloc,
     homedAt: geometry.prologue.homedAt,
     spAliases: geometry.prologue.spAliases,
   };

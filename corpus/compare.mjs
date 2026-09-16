@@ -1113,9 +1113,13 @@ for (const b of bins) {
 
   // The frame-scaffolding pass's own account (corpus/prologueStrip.ts). The
   // deletions are report-only — a fall is a refusal firing, a rise is more
-  // frames named; `framed` and the x64 `gs-xor` count are liveness, and
-  // `prologueDisagree` gates at 0 (a disagreement between UNWIND_INFO and
-  // stack.ts refuses the whole function, and the corpus has none).
+  // frames named; `framed` and the x64 `gs-xor` count are liveness. And
+  // `prologueDisagree` is a LIVENESS half rather than a gate at 0: a
+  // disagreement between UNWIND_INFO and stack.ts refuses the whole function,
+  // and the corpus's population is exactly the `__chkstk` prologue — one per
+  // x64 binary, where the record names an allocation the walk could not read.
+  // Both directions are flagged: a rise is a new disagreement, a fall to zero
+  // is a second witness that has stopped being consulted.
   if (B.prologueStrip && C.prologueStrip) {
     row(
       "frame scaffolding: framed",
@@ -1150,8 +1154,8 @@ for (const b of bins) {
     row(
       "  prologueDisagree",
       (x) => x.prologueStrip.prologueDisagree,
-      (a, c) => c > a,
-      "UNWIND_INFO AND stack.ts DISAGREE ABOUT A PROLOGUE",
+      (a, c) => c > a || (a > 0 && c === 0),
+      "PROLOGUE AGREEMENT MOVED (a rise is a new disagreement; a fall to 0 is a witness no longer consulted)",
     );
   } else {
     note("  frame scaffolding pass        NOT MEASURED on both sides (a run predating the pass)");

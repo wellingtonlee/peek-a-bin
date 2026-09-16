@@ -87,6 +87,11 @@ export function recordFrameStrip(
 ): void {
   res.funcs++;
   if (r.framed) res.framed++;
+  if (r.prologueDisagree) {
+    res.prologueDisagree++;
+    if (res.rows.length < 16) res.rows.push(`${funcName}: UNWIND_INFO and stack.ts disagree`);
+    return;
+  }
   for (const k of Object.keys(r.candidates) as StripShape[]) {
     res.candidates[k] += r.candidates[k];
     res.deleted[k] += r.deleted[k];

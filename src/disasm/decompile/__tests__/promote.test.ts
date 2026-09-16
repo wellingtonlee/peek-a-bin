@@ -45,13 +45,17 @@ function frameOf(...vars: StackVar[]): StackFrame {
 }
 
 /**
- * The four prologue facts `stack.ts` publishes for `decompile/prologue.ts`.
+ * The prologue facts `stack.ts` publishes for `decompile/prologue.ts`.
  * Nothing in this file reads them — promotion asks only `frameDelta` and
  * `frameEstablishedAt` — so every fixture carries the empty set.
  */
-const NO_PROLOGUE: Pick<StackFrame, "prologueEnd" | "spWritesAt" | "homedAt" | "spAliases"> = {
+const NO_PROLOGUE: Pick<
+  StackFrame,
+  "prologueEnd" | "spWritesAt" | "prologueAlloc" | "homedAt" | "spAliases"
+> = {
   prologueEnd: null,
   spWritesAt: [],
+  prologueAlloc: null,
   homedAt: [],
   spAliases: [],
 };

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { RuntimeFunction, ScopeTableEntry } from "../../../pe/types";
+import type { RuntimeFunction, ScopeTableEntry, X64Prolog } from "../../../pe/types";
 import type { CalleeClobbers } from "../../callSummary";
 import { recogniseCrtIdioms } from "../../crtIdioms";
 import { recognisePfnGlobals } from "../../pfnGlobals";
@@ -10173,6 +10173,7 @@ describe("decompileFunction — frame scaffolding is deleted only where nothing 
   function runStrip(
     instructions: Instruction[],
     is64 = false,
+    runtimeFunctions?: RuntimeFunction[],
   ): { code: string; report: import("../prologue").FrameStripReport | null } {
     const last = instructions[instructions.length - 1];
     const func: DisasmFunction = {
@@ -10193,7 +10194,7 @@ describe("decompileFunction — frame scaffolding is deleted only where nothing 
       new Map(),
       new Map(),
       new StructRegistry(),
-      undefined,
+      runtimeFunctions,
       undefined,
       undefined,
       undefined,
@@ -10469,6 +10470,87 @@ describe("decompileFunction — frame scaffolding is deleted only where nothing 
     expect(code).toContain("rsp -= rax;");
     expect(report?.spReadsKept).toContain("alloca");
     expect(report?.deleted["sp-alloc"]).toBe(0);
+  });
+
+  /**
+   * THE SECOND WITNESS (peek-a-bin-5b6q.1(b)). Where the image carries an x64
+   * `UNWIND_INFO`, the linker's own record of the prolog and `stack.ts`'s
+   * reading of it must agree or the whole function is refused — nothing is
+   * deleted and the report says why. The base case above (`a leaf's sub rsp
+   * with every slot named is not printed`) is the same function with no record
+   * at all, so these three differ from it only in the evidence offered.
+   *
+   * The record's `beginAddress` is an RVA against a VA function address, which
+   * is `funcPrologRecord`'s whole job — 0x1000 under an image base of 0x400000.
+   */
+  describe("against an x64 UNWIND_INFO", () => {
+    const LEAF = seq(0x401000, [
+      ["sub", "rsp, 0x28"],
+      ["mov", "dword ptr [rsp + 0x20], 1"],
+      ["mov", "eax, dword ptr [rsp + 0x20]"],
+      ["add", "rsp, 0x28"],
+      ["ret"],
+    ]);
+    const record = (prolog: Partial<X64Prolog> | null): RuntimeFunction[] => [
+      {
+        beginAddress: 0x1000,
+        endAddress: 0x1020,
+        unwindInfoAddress: 0x4000,
+        ...(prolog === null
+          ? {}
+          : {
+              x64Prolog: {
+                prologSize: 4,
+                frameRegister: null,
+                frameOffset: 0,
+                allocBytes: 0x28,
+                pushedNonvol: [],
+                savedNonvol: [],
+                savedXmm: [],
+                machineFrame: false,
+                ...prolog,
+              },
+            }),
+      },
+    ];
+
+    it("deletes as usual when the record agrees", () => {
+      const { code, report } = runStrip(LEAF, true, record({}));
+      expect(mentions(code, /\brsp\b/g)).toBe(0);
+      expect(report?.prologueDisagree).toBe(false);
+      expect(report?.deleted["sp-alloc"]).toBe(1);
+    });
+
+    it("refuses the whole function when the allocation the record names differs", () => {
+      const { code, report } = runStrip(LEAF, true, record({ allocBytes: 0x100 }));
+      expect(code).toContain("rsp -= 0x28;");
+      expect(report?.prologueDisagree).toBe(true);
+      expect(report?.deleted["sp-alloc"]).toBe(0);
+    });
+
+    it("refuses when SizeOfProlog does not reach the extent stack.ts read", () => {
+      // The walk ends one past `sub rsp, 0x28` at 0x401004; a prolog of one
+      // byte ends at 0x401001, so the record describes less than was read.
+      const { code, report } = runStrip(LEAF, true, record({ prologSize: 1 }));
+      expect(code).toContain("rsp -= 0x28;");
+      expect(report?.prologueDisagree).toBe(true);
+    });
+
+    it("runs on stack.ts alone when the record decoded no prolog", () => {
+      // A chained record, or one carrying an op `readX64Prolog` refuses: absent
+      // evidence is not disagreement.
+      const { code, report } = runStrip(LEAF, true, record(null));
+      expect(mentions(code, /\brsp\b/g)).toBe(0);
+      expect(report?.prologueDisagree).toBe(false);
+    });
+
+    it("a record whose SizeOfProlog reaches PAST the extent still agrees", () => {
+      // `SizeOfProlog` counts instructions `inlineFrameGeometry` deliberately
+      // leaves outside the extent (a spill store, an alias copy), so the test
+      // is one-sided: the record must reach AT LEAST as far.
+      const { report } = runStrip(LEAF, true, record({ prologSize: 0x20 }));
+      expect(report?.prologueDisagree).toBe(false);
+    });
   });
 });
 

@@ -977,9 +977,16 @@ pass`: candidates and deletions by shape (`fp-establish`, `sp-alloc`, `sp-restor
 `framed > 0` per binary (the pass saw frames — 204/20/18/201), and **`gs-xor > 0` on the x64
 pair** (15/13 functions: the /GS `x ^ rsp` read MUST survive by CLAUDE.md's `/GS` entry, so a pass
 that deleted the cookie mix reads 0 here before `staleGuards` could notice; x86 mixes the cookie
-with EBP, so its analogue is the frame-register half, 18/16). `prologueDisagree` gates at 0 beside
-it (commit b of peek-a-bin-5b6q.1: an x64 `UNWIND_INFO` that contradicts `stack.ts`'s prologue
-refuses the whole function). *Negative controls:* skipping the pass reddens the gate on all four
+with EBP, so its analogue is the frame-register half, 18/16). **`prologueDisagree` is a LIVENESS
+half beside it, not a gate at 0** (commit b of peek-a-bin-5b6q.1): an x64 `UNWIND_INFO` that
+contradicts `stack.ts`'s prologue refuses the whole function, and the surviving population on this
+corpus is exactly the `__chkstk` prologue — `mov eax, 0x1b30 / call __chkstk / sub rsp, rax`, one
+function per x64 binary (t64 `sub_14000D8C4`, w64 `sub_14000BD44`), where the record names a
+6960-byte allocation and the walk read none. Refusing there is right, so the row asserts **> 0 on
+the x64 pair and 0 on x86** (which has no `.pdata` and therefore no second witness at all); gating
+it at 0 would mean weakening the comparison until it stopped discriminating. `compare.mjs` flags
+both directions — a rise is a new disagreement, a fall to zero a witness gone quiet.
+*Negative controls:* skipping the pass reddens the gate on all four
 binaries (4/18/17/4 at 6299113); dropping the function-wide read check reddens `pipeline.test.ts`'s
 "a mid-body sub esp stays and keeps the prologue". *What it cannot see:* a write that IS read —
 the refusals are the report rows, and a rise in `mentioning` is read against them; and whether the
@@ -1744,7 +1751,7 @@ time. `compare.mjs` shows every row; read `pfn_ OUTSIDE a data section` leaving 
 `npm run corpus:parserdiff`. Over **all six** binaries — the x86 four *and* the ARM64 pair —
 plus any extra paths given as arguments. Missing binaries skip cleanly and exit 0; exit 1 on any
 red gate. The last line reads
-`98 of 118 gates green, 20 VACUOUS (empty population — no evidence), 38 rows reported. OK`.
+`100 of 120 gates green, 20 VACUOUS (empty population — no evidence), 42 rows reported. OK`.
 
 ### Why it exists
 
@@ -1790,6 +1797,17 @@ Three places the independence is genuinely weaker, stated rather than glossed:
 - **`.pdata` on ARM64 is not asked here** — `npm run corpus:arm64` already gates every ARM64
   record against the sweep, `.xdata` codes included, which is the stronger oracle. The **x64**
   records on t64 and w64 are asked here and nowhere else.
+- **Both readers REFUSE the same `UNWIND_INFO` records** (peek-a-bin-5b6q.1, commit b): a chained
+  record, an unwind op neither decodes, codes running past the section. So the prolog comparison
+  says nothing about whether those refusals are the right ones — `src/pe/__tests__/pdata.test.ts`
+  pins them over hand-built code bytes — and the report carries
+  `UNWIND_INFO records both readers refuse` (**0/0** here) so a refusal rate cannot drift unseen.
+  The DECODING is genuinely independent: the reference groups the codes with a table of node
+  counts and interprets them in a second pass, where the parser consumes operands and advances its
+  cursor in one `switch`, so the slot-count error that is this reader's characteristic failure
+  cannot be shared. Negative controls run at that commit: dropping `UWOP_ALLOC_SMALL`'s `+ 8` bias
+  in the parser reddens the gate at **214/240 and 209/235**; making the parser alone refuse
+  `UWOP_SET_FPREG` reddens it at 3/3 through the `decoded by parser only` arm.
 
 ### The subjects
 
@@ -1804,7 +1822,7 @@ Three places the independence is genuinely weaker, stated rather than glossed:
 | **Checksum** — reference vs parser, and reference vs the linker's stored value | two gates | 1 per image; the linker half is vacuous on the ARM64 pair, which store 0 |
 | **imphash** — end to end, parser import list included | digest disagreement | 85–94 `dll.func` parts |
 | **Resources** — the flattened leaves *and* the top-level tree shape | two gates | 10 entries, 4 type nodes |
-| **`.pdata`** (x64 only) — begin/end/unwind, handler flags, handler RVA | record disagreements | 240 and 235 records |
+| **`.pdata`** (x64 only) — begin/end/unwind, handler flags, handler RVA, **and the `UNWIND_INFO` prolog** | record disagreements | 240 and 235 records; 240/235 prologs decoded by both readers |
 | **Relocations** — blocks, entry types and offsets | block and entry disagreements | 166–1172 entries |
 
 Every subject that must have a population on a real MSVC image carries an explicit

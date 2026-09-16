@@ -285,6 +285,229 @@ describe("parsePdata — x64 UNWIND_INFO version", () => {
 });
 
 /**
+ * x64 `UNWIND_INFO` PROLOG CODES — `readX64Prolog`, the second witness to
+ * `stack.ts`'s prologue walk (peek-a-bin-5b6q.1).
+ *
+ * Every record here is hand-built from the format's own layout rather than
+ * taken from a binary: a four-byte header (`version:3 | flags:5`,
+ * `SizeOfProlog`, `CountOfCodes`, `FrameRegister:4 | FrameOffset:4`) followed
+ * by `CountOfCodes` two-byte `UNWIND_CODE` slots, each `CodeOffset` then
+ * `UnwindOp:4 | OpInfo:4`. The codes appear in REVERSE prolog order, which is
+ * why the fixtures below write the allocation first and the first `push` last —
+ * and why nothing in the reader may depend on that order, since it sums.
+ *
+ * The refusals are the half worth having: a partial `allocBytes` compares equal
+ * to nothing and its consumer tests it for EQUALITY, so every unknown code
+ * withholds the whole record.
+ */
+describe("parsePdata — x64 UNWIND_INFO prolog codes", () => {
+  const UNW_FLAG_EHANDLER = 0x1;
+  const UNW_FLAG_CHAININFO = 0x4;
+
+  /** `UnwindOp:4 | OpInfo:4` in one byte, low nibble first. */
+  const code = (offset: number, op: number, info: number) => [offset & 0xff, (info << 4) | op];
+  /** A two-byte operand slot, little-endian. */
+  const slot = (n: number) => [n & 0xff, (n >> 8) & 0xff];
+
+  /** A whole UNWIND_INFO record: header then the code bytes as given. */
+  function record(
+    codes: number[],
+    opts: { version?: number; flags?: number; prologSize?: number; frameByte?: number } = {},
+  ): number[] {
+    return [
+      versionFlags(opts.version ?? 1, opts.flags ?? 0),
+      opts.prologSize ?? 0x10,
+      codes.length / 2,
+      opts.frameByte ?? 0x00,
+      ...codes,
+    ];
+  }
+
+  const prologOf = (unwindBytes: number[], unwindRva = 0x4000) => {
+    const { buffer, sections, dir } = buildX64UnwindBuffer(
+      [{ begin: 0x1000, end: 0x1100, unwind: unwindRva }],
+      { [unwindRva]: unwindBytes },
+    );
+    return parsePdata(buffer, dir, sections, IMAGE_FILE_MACHINE_AMD64)[0].x64Prolog;
+  };
+
+  it("decodes push rbp / push rbx / sub rsp, 0x40 — the ordinary MSVC frame", () => {
+    // Reverse prolog order: the allocation, then the two pushes.
+    const p = prologOf(
+      record(
+        [
+          ...code(0x09, 2, 7), // UWOP_ALLOC_SMALL, 7*8+8 = 0x40
+          ...code(0x05, 0, 3), // UWOP_PUSH_NONVOL rbx
+          ...code(0x01, 0, 5), // UWOP_PUSH_NONVOL rbp
+        ],
+        { prologSize: 0x09 },
+      ),
+    );
+    expect(p).toEqual({
+      prologSize: 0x09,
+      frameRegister: null,
+      frameOffset: 0,
+      allocBytes: 0x40,
+      pushedNonvol: ["rbx", "rbp"],
+      savedNonvol: [],
+      savedXmm: [],
+      machineFrame: false,
+    });
+  });
+
+  it("scales UWOP_ALLOC_SMALL by 8 with the bias: info 0 is 8 bytes and info 15 is 128", () => {
+    expect(prologOf(record(code(0x04, 2, 0)))?.allocBytes).toBe(8);
+    expect(prologOf(record(code(0x04, 2, 15)))?.allocBytes).toBe(128);
+  });
+
+  it("reads UWOP_ALLOC_LARGE info 0 as the next slot scaled by 8", () => {
+    const p = prologOf(record([...code(0x08, 1, 0), ...slot(0x1000)]));
+    expect(p?.allocBytes).toBe(0x8000);
+  });
+
+  it("reads UWOP_ALLOC_LARGE info 1 as the next TWO slots, unscaled and little-endian", () => {
+    const p = prologOf(record([...code(0x0b, 1, 1), ...slot(0x0080), ...slot(0x0012)]));
+    expect(p?.allocBytes).toBe(0x120080);
+  });
+
+  it("refuses UWOP_ALLOC_LARGE with any other op info", () => {
+    expect(prologOf(record([...code(0x08, 1, 2), ...slot(0x10)]))).toBeUndefined();
+  });
+
+  it("sums several allocations rather than taking the first", () => {
+    const p = prologOf(record([...code(0x0c, 2, 3), ...code(0x08, 1, 0), ...slot(0x10)]));
+    expect(p?.allocBytes).toBe(0x20 + 0x80);
+  });
+
+  it("takes the frame register from the HEADER, and only when a SET_FPREG code is present", () => {
+    // frameByte 0x35: FrameRegister 5 (rbp) in the low nibble, FrameOffset 3 in
+    // the high one — 3 * 16 = 0x30.
+    const withCode = prologOf(record(code(0x0e, 3, 0), { frameByte: 0x35 }));
+    expect(withCode?.frameRegister).toBe("rbp");
+    expect(withCode?.frameOffset).toBe(0x30);
+
+    // The same header byte with no SET_FPREG code names nothing: MSVC writes 0
+    // there for an RSP-relative frame, and 0 is RAX's number, not "none".
+    const withoutCode = prologOf(record(code(0x04, 2, 0), { frameByte: 0x35 }));
+    expect(withoutCode?.frameRegister).toBeNull();
+    expect(withoutCode?.frameOffset).toBe(0);
+  });
+
+  it("reads UWOP_SAVE_NONVOL as a scaled-by-8 offset and _FAR as an unscaled pair", () => {
+    const near = prologOf(record([...code(0x10, 4, 6), ...slot(0x0c)]));
+    expect(near?.savedNonvol).toEqual([{ reg: "rsi", offset: 0x60 }]);
+
+    const far = prologOf(record([...code(0x10, 5, 7), ...slot(0x3456), ...slot(0x0012)]));
+    expect(far?.savedNonvol).toEqual([{ reg: "rdi", offset: 0x123456 }]);
+  });
+
+  it("reads UWOP_SAVE_XMM128 as a scaled-by-16 offset and _FAR as an unscaled pair", () => {
+    const near = prologOf(record([...code(0x12, 8, 6), ...slot(0x04)]));
+    expect(near?.savedXmm).toEqual([{ reg: "xmm6", offset: 0x40 }]);
+
+    const far = prologOf(record([...code(0x12, 9, 7), ...slot(0x0000), ...slot(0x0001)]));
+    expect(far?.savedXmm).toEqual([{ reg: "xmm7", offset: 0x10000 }]);
+  });
+
+  it("records UWOP_PUSH_MACHFRAME and refuses an op info above 1", () => {
+    expect(prologOf(record(code(0x00, 10, 0)))?.machineFrame).toBe(true);
+    expect(prologOf(record(code(0x00, 10, 1)))?.machineFrame).toBe(true);
+    expect(prologOf(record(code(0x00, 10, 2)))).toBeUndefined();
+  });
+
+  it("refuses a chained record whole — its codes describe another function's prolog", () => {
+    const rec = record(code(0x01, 0, 5), { flags: UNW_FLAG_CHAININFO });
+    expect(prologOf(rec)).toBeUndefined();
+    // …and the chained record is still read for what it does say.
+    const { buffer, sections, dir } = buildX64UnwindBuffer(
+      [{ begin: 0x1000, end: 0x1100, unwind: 0x4000 }],
+      { 0x4000: rec },
+    );
+    const [rf] = parsePdata(buffer, dir, sections, IMAGE_FILE_MACHINE_AMD64);
+    expect(rf.handlerFlags).toBe(UNW_FLAG_CHAININFO);
+  });
+
+  it("refuses op codes 6 and 7 in EITHER version rather than guessing their slot count", () => {
+    for (const version of [1, 2]) {
+      for (const op of [6, 7]) {
+        expect(
+          prologOf(record([...code(0x01, 0, 5), ...code(0x08, op, 0), ...slot(0)], { version })),
+          `version ${version} op ${op}`,
+        ).toBeUndefined();
+      }
+    }
+  });
+
+  it("refuses op codes the format does not define", () => {
+    for (const op of [11, 12, 13, 14, 15]) {
+      expect(prologOf(record(code(0x04, op, 0))), `op ${op}`).toBeUndefined();
+    }
+  });
+
+  it("refuses a record whose codes run past the containing section", () => {
+    // `.xdata` is 0x200 bytes at RVA 0x4000, so 0x41f8 leaves eight: a header
+    // and two slots, against a count claiming three.
+    const rec = record([...code(0x04, 2, 0), ...code(0x02, 0, 3), ...code(0x01, 0, 5)]);
+    expect(prologOf(rec, 0x41f8)).toBeUndefined();
+    // The same record two bytes earlier fits exactly and is read.
+    expect(prologOf(rec, 0x41f6)?.allocBytes).toBe(8);
+  });
+
+  it("refuses a record whose operand slot falls outside its own code count", () => {
+    // UWOP_SAVE_NONVOL claims a following slot; the count says there is none.
+    expect(prologOf(record(code(0x10, 4, 6)))).toBeUndefined();
+  });
+
+  it("refuses a record naming RSP as a pushed or saved register", () => {
+    expect(prologOf(record(code(0x01, 0, 4)))).toBeUndefined();
+    expect(prologOf(record([...code(0x10, 4, 4), ...slot(2)]))).toBeUndefined();
+    expect(prologOf(record(code(0x0e, 3, 0), { frameByte: 0x04 }))).toBeUndefined();
+  });
+
+  it("decodes a record with no codes at all as an empty prolog", () => {
+    expect(prologOf(record([], { prologSize: 0 }))).toEqual({
+      prologSize: 0,
+      frameRegister: null,
+      frameOffset: 0,
+      allocBytes: 0,
+      pushedNonvol: [],
+      savedNonvol: [],
+      savedXmm: [],
+      machineFrame: false,
+    });
+  });
+
+  it("says nothing about a prolog when the version is neither 1 nor 2", () => {
+    for (const version of [0, 3, 7]) {
+      expect(prologOf(record(code(0x01, 0, 5), { version })), `version ${version}`).toBeUndefined();
+    }
+  });
+
+  it("decodes the prolog of a handler-bearing record too, beside the handler", () => {
+    const rec = [
+      versionFlags(1, UNW_FLAG_EHANDLER),
+      0x09,
+      0x02,
+      0x00,
+      ...code(0x09, 2, 7),
+      ...code(0x01, 0, 5),
+      0x00,
+      0x50,
+      0x00,
+      0x00, // handler RVA 0x5000
+    ];
+    const { buffer, sections, dir } = buildX64UnwindBuffer(
+      [{ begin: 0x1000, end: 0x1100, unwind: 0x4000 }],
+      { 0x4000: rec },
+    );
+    const [rf] = parsePdata(buffer, dir, sections, IMAGE_FILE_MACHINE_AMD64);
+    expect(rf.handlerAddress).toBe(0x5000);
+    expect(rf.x64Prolog?.allocBytes).toBe(0x40);
+    expect(rf.x64Prolog?.pushedNonvol).toEqual(["rbp"]);
+  });
+});
+
+/**
  * ARM64 `.pdata` fixture. An ARM64 RUNTIME_FUNCTION is **8** bytes — an RVA and
  * one `UnwindData` word — not the 12-byte x64 triple, and the function's extent
  * lives in the unwind data rather than in the entry. `xdata` places raw words at
@@ -949,7 +1172,10 @@ describe("parsePdata — x64 scope table", () => {
 
   it("withholds a table but keeps the record when the check fails", () => {
     // A refusal costs the scope table and nothing else: the extent
-    // `functionDetect` treats as authoritative is unaffected.
+    // `functionDetect` treats as authoritative is unaffected, and so is the
+    // prolog — this fixture's `countOfCodes` is 0, so `x64Prolog` is the empty
+    // prolog rather than absent, which is itself the claim that a record with
+    // no unwind codes describes a prolog that pushes and allocates nothing.
     const [rf] = build([2096]);
     expect(rf).toEqual({
       beginAddress: FN_BEGIN,
@@ -957,6 +1183,16 @@ describe("parsePdata — x64 scope table", () => {
       unwindInfoAddress: XDATA_VA,
       handlerFlags: UNW_FLAG_EHANDLER,
       handlerAddress: 0x1080,
+      x64Prolog: {
+        prologSize: 0x04,
+        frameRegister: null,
+        frameOffset: 0,
+        allocBytes: 0,
+        pushedNonvol: [],
+        savedNonvol: [],
+        savedXmm: [],
+        machineFrame: false,
+      },
     });
   });
 });

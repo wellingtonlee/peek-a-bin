@@ -990,7 +990,7 @@ describe("analyzeStackFrame — architecture refusal", () => {
 });
 
 /**
- * The four prologue facts published for `decompile/prologue.ts`: the extent,
+ * The prologue facts published for `decompile/prologue.ts`: the extent,
  * the stack-pointer arithmetic inside it, the home-slot spills and the
  * stack-pointer aliases. Facts about the WALK, so they travel on the refusal
  * path too (an x64 leaf under frame-pointer omission has a `sub rsp` and no
@@ -1008,6 +1008,7 @@ describe("analyzeStackFrame — the prologue extent and its arithmetic", () => {
     const frame = analyzeStackFrame(func(insns.length * 4), insns, "x86", false)!;
     expect(frame.prologueEnd).toBe(0x100c);
     expect(frame.spWritesAt).toEqual([0x1008]);
+    expect(frame.prologueAlloc).toBe(0x10);
     expect(frame.homedAt).toEqual([]);
     expect(frame.spAliases).toEqual([["rbp", -4]]);
   });
@@ -1022,6 +1023,7 @@ describe("analyzeStackFrame — the prologue extent and its arithmetic", () => {
     expect(frame.frameDelta).toBeNull();
     expect(frame.prologueEnd).toBe(0x1004);
     expect(frame.spWritesAt).toEqual([0x1000]);
+    expect(frame.prologueAlloc).toBe(0x28);
   });
 
   it("names the spill that homed an argument, and lets a register spill keep the extent open", () => {
@@ -1039,6 +1041,7 @@ describe("analyzeStackFrame — the prologue extent and its arithmetic", () => {
     expect(frame.homedAt).toEqual([0x1000]);
     expect(frame.prologueEnd).toBe(0x100c);
     expect(frame.spWritesAt).toEqual([0x1008]);
+    expect(frame.prologueAlloc).toBe(0x20);
   });
 
   it("closes the extent at a store of an immediate, so a later sub is the body's", () => {
@@ -1054,6 +1057,8 @@ describe("analyzeStackFrame — the prologue extent and its arithmetic", () => {
     const frame = analyzeStackFrame(func(insns.length * 4), insns, "x86", false)!;
     expect(frame.prologueEnd).toBe(0x100c);
     expect(frame.spWritesAt).toEqual([0x1008]);
+    // The body's second `sub esp, 8` is outside the extent, so it is not summed.
+    expect(frame.prologueAlloc).toBe(8);
   });
 
   it("leaves a sub after an intervening register write outside the extent", () => {
@@ -1072,6 +1077,9 @@ describe("analyzeStackFrame — the prologue extent and its arithmetic", () => {
     expect(frame.frameDelta).toBe(4);
     expect(frame.prologueEnd).toBe(0x1010);
     expect(frame.spWritesAt).toEqual([]);
+    // An extent was read and it allocates nothing — which is NOT `null`, the
+    // answer for a walk that read no extent at all (see the last case here).
+    expect(frame.prologueAlloc).toBe(0);
   });
 
   it("records a stack-pointer alias copy without extending the extent", () => {
@@ -1092,6 +1100,7 @@ describe("analyzeStackFrame — the prologue extent and its arithmetic", () => {
     ]);
     expect(frame.prologueEnd).toBe(0x1010);
     expect(frame.spWritesAt).toEqual([0x100c]);
+    expect(frame.prologueAlloc).toBe(0x100);
   });
 
   it("publishes no extent for a helper-framed function", () => {
@@ -1120,5 +1129,38 @@ describe("analyzeStackFrame — the prologue extent and its arithmetic", () => {
     expect(frame.frameEstablishedAt).toBeNull();
     expect(frame.prologueEnd).toBeNull();
     expect(frame.spWritesAt).toEqual([]);
+    expect(frame.prologueAlloc).toBeNull();
+  });
+
+  /**
+   * THE SHAPE THE UNWIND WITNESS CAUGHT (peek-a-bin-5b6q.1). MSVC's large-frame
+   * prologue puts the allocation at instruction index TEN — behind `mov rax,
+   * rsp`, three argument spills, five pushes and the `lea` that establishes the
+   * frame — and `analyzeStackFrame`'s separate `frameSize` scan reads only the
+   * first ten. `prologueAlloc` comes off the walk, which has no such window,
+   * and that is why the agreement test in `decompile/pipeline.ts` compares
+   * against it rather than against `frameSize`. Both halves are asserted here
+   * so the divergence is a pinned fact rather than a surprise.
+   */
+  it("reads an allocation the ten-instruction frameSize scan cannot reach", () => {
+    const insns = body(
+      ["mov", "rax, rsp"],
+      ["mov", "qword ptr [rax + 8], rbx"],
+      ["mov", "qword ptr [rax + 0x10], rsi"],
+      ["mov", "qword ptr [rax + 0x18], rdi"],
+      ["push", "rbp"],
+      ["push", "r12"],
+      ["push", "r13"],
+      ["push", "r14"],
+      ["push", "r15"],
+      ["lea", "rbp, [rax - 0x6c8]"],
+      ["sub", "rsp, 0x7a0"],
+      ["mov", "rax, qword ptr [rbp + 0x690]"],
+      ["mov", "qword ptr [rbp - 0x10], rax"],
+    );
+    const frame = analyzeStackFrame(func(insns.length * 4), insns, "x86", true)!;
+    expect(frame.prologueAlloc).toBe(0x7a0);
+    expect(frame.spWritesAt).toEqual([0x1028]);
+    expect(frame.frameSize).toBe(0);
   });
 });

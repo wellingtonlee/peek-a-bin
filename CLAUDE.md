@@ -93,7 +93,8 @@ Reuse them rather than re-rolling the logic.
   - `sections.ts` — `findCodeSection`/`isCodeSection`/`dataSectionRanges`; `parser.ts`'s
     `buildSectionIndex()` + `rvaToFileOffsetIndexed()` are the batch form of `rvaToFileOffset`.
   - `arm64Unwind.ts` (both ARM64 unwind encodings); `pdata.ts`'s `readScopeTable` (the
-    `__C_specific_handler` scope table — nothing consumes `RuntimeFunction.scopeTable` yet).
+    `__C_specific_handler` scope table — nothing consumes `RuntimeFunction.scopeTable` yet) and
+    `readX64Prolog` (the x64 `UNWIND_CODE` walk behind `RuntimeFunction.x64Prolog`).
 - **`disasm/`** — engine, types, CFG, operand parsing, stack analysis, signatures.
   - `capstoneWindow.ts` owns **every** call into the decoder; nothing else may call `cs.disasm`.
     `capstoneReader.ts` is the hand-written `cs_insn` marshaller under it (~3x faster) and the only
@@ -986,6 +987,22 @@ refused. **Read the long-form entry before changing the code it describes.**
   `handler == 1` is the format's own spelling of `EXCEPTION_EXECUTE_HANDLER` and must never be
   resolved as an address; a failure yields **nothing rather than a short table**; and `undefined`
   means "the record did not say", never "there are no regions".
+- **An x64 `UNWIND_INFO`'s PROLOG is decoded whole or not at all** (`readX64Prolog`,
+  `RuntimeFunction.x64Prolog`): `SizeOfProlog`, the header's `FrameRegister`/`FrameOffset` and the
+  `UWOP_*` codes — `PUSH_NONVOL`, `ALLOC_SMALL` (`info * 8 + 8`), `ALLOC_LARGE` (a scaled slot, or
+  two unscaled), `SET_FPREG`, `SAVE_NONVOL(_FAR)`, `SAVE_XMM128(_FAR)`, `PUSH_MACHFRAME`. Every
+  refusal withholds the WHOLE record, on `readScopeTable`'s reasoning, sharpened by the consumer:
+  its one reader compares `allocBytes` for **equality**, so a sum that stopped at an unknown code is
+  a plausible wrong answer. Refused: `UNW_FLAG_CHAININFO` (the codes are another function's), op
+  codes **6 and 7 in either version** (deprecated `SAVE_XMM*` in v1, `EPILOG`/`SPARE_CODE` in v2 —
+  the node counts are unsettled from a file here and a wrong one desynchronises every later code),
+  ops 11-15, codes past the containing section, and a record naming RSP as a pushed or saved
+  register. **`frameRegister` is taken from the header ONLY behind a `UWOP_SET_FPREG` code** — MSVC
+  writes 0 there for an RSP-relative frame and 0 is RAX's number, not "none". `corpus:parserdiff`
+  decodes the same records a second time from the spec (a node-count table plus a separate
+  interpretation pass, so a slot-count error cannot be shared) and gates the two field by field:
+  240/235 records, 0 disagreements. Both readers refuse the same records, which the report says
+  rather than hides.
 - **A hybrid image has TWO exception tables and `pe/pdata.ts` reads the one the machine word
   describes** — right for every hybrid case and incomplete for all of them. **ARM64X carries 0xAA64
   and is refused by decode rate; ARM64EC does NOT — it is marked 0x8664** and is disassembled as x64
@@ -1603,6 +1620,22 @@ refused. **Read the long-form entry before changing the code it describes.**
   own account (`frameTap`) reports kept reads by reason, with `gs-xor > 0` on x64 as the control
   that the cookie read survives. Not deleted, deliberately: `push`/`pop` pairs (SSA already does),
   home-slot spills (`dropParameterIdentities`), `mov`-based callee-saved save/restore pairs.
+- **…and on x64 the LINKER'S OWN record of the prolog is a second witness the pass must agree with**
+  (`pipeline.ts`'s `prologueAgrees`, over `RuntimeFunction.x64Prolog`). Two tests, both one-sided or
+  exact: `beginAddress + SizeOfProlog` must reach **at least** as far as `StackFrame.prologueEnd`
+  (the record counts spill stores and alias copies the walk deliberately leaves outside its extent),
+  and `allocBytes` must **equal** `StackFrame.prologueAlloc`. A disagreement refuses the whole
+  function — nothing deleted, `FrameStripReport.prologueDisagree` set. Absent evidence is not
+  disagreement: no record, a record this reader would not decode, or no extent all pass, which is
+  why x86 (no `.pdata`) runs on `stack.ts` alone. **`prologueAlloc` and NOT `frameSize`, which is
+  the finding this test produced**: `frameSize` is a separate ten-instruction regex scan over the
+  function's head, and MSVC's large-frame prologue puts `sub rsp, 0x7a0` at index ten behind a
+  `mov rax, rsp`, three spills, five pushes and a `lea rbp` — four functions per x64 binary read
+  `frameSize` 0 against a record saying 1952. That window is a **defect recorded rather than
+  repaired here**, because `frameSize`'s other reader decides local-vs-parameter for `[rsp + N]`.
+  **`prologueDisagree` is a LIVENESS half, not a gate at 0**: the surviving population is exactly
+  the `__chkstk` prologue (`mov eax, 0x1b30 / call __chkstk / sub rsp, rax`, one function per x64
+  binary), where refusing is right, so the audit asserts it is **non-zero on x64 and zero on x86**.
 
 ### UI, build and deployment
 

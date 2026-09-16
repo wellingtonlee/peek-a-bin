@@ -11,6 +11,7 @@ import {
   collectFuncInsns,
   type FuncExtent,
   funcExceptionRecord,
+  funcPrologRecord,
   funcXrefEntries,
 } from "../disasm/funcInsns";
 // Type-only: erased at compile time, so this adds no runtime edge to
@@ -19,7 +20,7 @@ import type { DetectPass, ImageBounds, XrefInsn } from "../disasm/functionDetect
 import { jumpTableTargets } from "../disasm/seeds";
 import type { FunctionSignature } from "../disasm/signatures";
 import type { DisasmFunction, Instruction, StackFrame, Xref } from "../disasm/types";
-import type { SectionHeader, StringScanCoverage } from "../pe/types";
+import type { RuntimeFunction, SectionHeader, StringScanCoverage } from "../pe/types";
 import { BlobSourceRegistry } from "./blobSource";
 import { REQUEST_TIMEOUT_MS, WorkerTimeoutError } from "./requestTimeout";
 import { prepareBinaryArgs } from "./transfer";
@@ -712,6 +713,15 @@ class DisasmWorkerClient {
     // Sent only when the caller has them, so an older caller gets exactly the
     // pre-summary behaviour rather than a half-built one (peek-a-bin-s2ws).
     const pdataRecord = funcExceptionRecord(func, runtimeFunctions);
+    // The record describing this function's own prolog — usually the same row,
+    // and a second one only where the handler-bearing record is another
+    // function's. `prologueAgrees` in pipeline.ts reads it through the same
+    // selector over there, so sending both keeps the worker's answer the one the
+    // whole-table callers get (peek-a-bin-5b6q.1).
+    const prologRecord = funcPrologRecord(func, runtimeFunctions);
+    const pdataRows = [pdataRecord, prologRecord].filter(
+      (r, i, all): r is RuntimeFunction => r !== undefined && all.indexOf(r) === i,
+    );
     const args = this.decoded({
       func,
       funcInsns: collectFuncInsns(func, instructions),
@@ -731,7 +741,7 @@ class DisasmWorkerClient {
       // against 0.001 ms for the one row, measured at 755ea94. PE32 has no
       // `.pdata` at all, so this is an x64 saving and the two 32-bit corpus
       // binaries are the untouched control.
-      runtimeFunctions: pdataRecord ? [pdataRecord] : undefined,
+      runtimeFunctions: pdataRows.length > 0 ? pdataRows : undefined,
       funcExtents: functions?.map((f) => [f.address, f.size] as [number, number]),
       insnsToken: functions ? this.insnsToken(instructions) : undefined,
       seh32Scopes: seh32Scopes ?? undefined,

@@ -319,12 +319,55 @@ export interface ScopeTableEntry {
   jumpTarget: number;
 }
 
+/**
+ * What an x64 `UNWIND_INFO` says about its function's PROLOG — the linker's
+ * own record of the frame, decoded from the header bytes and the `UNWIND_CODE`
+ * array. `pe/pdata.ts`'s `readX64Prolog` is the one reader; `undefined` on the
+ * `RuntimeFunction` means "the record did not say" (a chained record, an
+ * unwind op this reader does not decode, codes running past the section),
+ * never "there is no prolog".
+ *
+ * Consumed by `decompile/pipeline.ts` as the second witness to `stack.ts`'s
+ * prologue walk: where both exist, `beginAddress + prologSize` must reach
+ * `StackFrame.prologueEnd` and `allocBytes` must equal `frameSize`, or the
+ * frame-scaffolding pass refuses the whole function (peek-a-bin-5b6q.1).
+ */
+export interface X64Prolog {
+  /** `SizeOfProlog`: bytes from `beginAddress` to the end of the prolog. */
+  prologSize: number;
+  /**
+   * The frame register `UWOP_SET_FPREG` establishes (`FrameRegister` in the
+   * header), or `null` when the function's frame is RSP-relative.
+   */
+  frameRegister: string | null;
+  /** `FrameOffset * 16`: the frame register's displacement from RSP when set. */
+  frameOffset: number;
+  /** Bytes the prolog allocates, `UWOP_ALLOC_SMALL` and `UWOP_ALLOC_LARGE` summed. */
+  allocBytes: number;
+  /** Registers `UWOP_PUSH_NONVOL` pushed, in the codes' order (last push first). */
+  pushedNonvol: string[];
+  /** Registers `UWOP_SAVE_NONVOL(_FAR)` stored, with their RSP-relative offsets. */
+  savedNonvol: { reg: string; offset: number }[];
+  /** `UWOP_SAVE_XMM128(_FAR)` stores, with their RSP-relative offsets. */
+  savedXmm: { reg: string; offset: number }[];
+  /** `UWOP_PUSH_MACHFRAME` was present (an interrupt/exception frame). */
+  machineFrame: boolean;
+}
+
 export interface RuntimeFunction {
   beginAddress: number; // RVA
   endAddress: number; // RVA
   unwindInfoAddress: number; // RVA
   handlerAddress?: number; // RVA of exception handler (if UNW_FLAG_EHANDLER/UHANDLER)
   handlerFlags?: number; // UNWIND_INFO flags byte
+  /**
+   * x64 only: the prolog as the unwind codes describe it — see {@link X64Prolog}.
+   * **`undefined` MEANS "THE RECORD DID NOT SAY"**, for `scopeTable`'s reason:
+   * a chained record (`UNW_FLAG_CHAININFO`) is refused rather than followed, an
+   * op code this reader does not decode refuses the whole record, and so do
+   * codes that run past the containing section. Absent on ARM64.
+   */
+  x64Prolog?: X64Prolog;
   /**
    * ARM64 only: the stack frame this record describes, decoded from the packed
    * `.pdata` word or from the `.xdata` unwind codes — see `pe/arm64Unwind.ts`.

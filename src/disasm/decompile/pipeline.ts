@@ -2,7 +2,7 @@ import type { RuntimeFunction, ScopeTableEntry } from "../../pe/types";
 import type { CalleeClobbers } from "../callSummary";
 import { type BasicBlock, buildCFG, detectLoops } from "../cfg";
 import { namedGlobalsFor } from "../crtIdioms";
-import { funcExceptionRecord } from "../funcInsns";
+import { funcExceptionRecord, funcPrologRecord } from "../funcInsns";
 import { type Seh32ScopeTable, trylevelComment } from "../seh32";
 import type { FunctionSignature } from "../signatures";
 import type { DisasmFunction, Instruction, StackFrame, Xref } from "../types";
@@ -20,7 +20,7 @@ import {
   outgoingSlotReads,
 } from "./lifter";
 import type { NamingContext } from "./naming";
-import { type FrameStripReport, stripFrameScaffolding } from "./prologue";
+import { type FrameStripReport, refusedFrameStrip, stripFrameScaffolding } from "./prologue";
 import { applyUserNames, promoteVars } from "./promote";
 import { RegState } from "./regstate";
 import { buildSSA, detectNaturalLoops } from "./ssa";
@@ -438,14 +438,21 @@ export function decompileFunction(
     // whose `stackDerivedBases` follows the `rbp = rsp` chain to refuse a
     // struct over the frame, and BEFORE emission. The epilogue grammar is read
     // off the instruction stream the CFG was built from. See `prologue.ts`.
-    irFunc = stripFrameScaffolding(
-      irFunc,
-      blocks.flatMap((b) => b.insns).sort((a, b) => a.address - b.address),
-      func,
-      stackFrame,
-      is64,
-      frameTap,
-    );
+    //
+    // Where the image carries a second witness to the prologue — an x64
+    // `UNWIND_INFO` — the two must agree or the whole function is refused.
+    if (prologueAgrees(func, stackFrame, funcPrologRecord(func, runtimeFunctions))) {
+      irFunc = stripFrameScaffolding(
+        irFunc,
+        blocks.flatMap((b) => b.insns).sort((a, b) => a.address - b.address),
+        func,
+        stackFrame,
+        is64,
+        frameTap,
+      );
+    } else {
+      frameTap?.(refusedFrameStrip((stackFrame?.frameDelta ?? null) !== null));
+    }
 
     // 9. Emit C text + lineMap
     //
@@ -677,6 +684,60 @@ function wrapExceptionRegions(
   };
 
   return [tryStmt];
+}
+
+/**
+ * Do the linker's record of the prolog and `stack.ts`'s reading of it agree?
+ *
+ * Two witnesses to one fact, and the frame-scaffolding pass deletes only where
+ * both say the same thing. `UNWIND_INFO`'s `SizeOfProlog` covers every push,
+ * allocation and frame establishment the unwinder must undo, so it must reach
+ * at least as far as `StackFrame.prologueEnd` — which `inlineFrameGeometry`
+ * ends at the last such instruction it read (spill stores do not extend it,
+ * and neither does an alias copy, precisely so the two stay comparable). And
+ * `allocBytes`, the `UWOP_ALLOC_*` codes summed, must equal
+ * `StackFrame.prologueAlloc`, what that same walk read the `sub <sp>, imm`
+ * instructions inside the extent to allocate.
+ *
+ * **`prologueAlloc` and NOT `frameSize`, which is the finding this test
+ * produced.** `frameSize` is a separate ten-instruction regex scan over the
+ * function's head, and MSVC's large-frame prologue — `mov rax, rsp`, three
+ * argument spills, five pushes, `lea rbp, [rax - 0x6c8]`, then `sub rsp, 0x7a0`
+ * at index ten — puts the allocation one instruction outside it, leaving
+ * `frameSize` 0 against a record saying 1952. Four functions per x64 corpus
+ * binary read that way (t64 `sub_140001C5C`, `__handler_1400043dc`,
+ * `sub_1400080E0`, `sub_14000B094`, and the same four shapes on w64); the
+ * agreement test asks the reading the PASS depends on, and `frameSize`'s own
+ * window is a defect recorded rather than repaired here, because its other
+ * reader decides local-vs-parameter for `[rsp + N]` on x64.
+ *
+ * A `__chkstk` prologue's `sub rsp, rax` carries no immediate, so the walk
+ * stops at it and `prologueAlloc` is whatever it read before — which is what
+ * makes the comparison refuse those functions rather than vouch for them.
+ *
+ * Absent evidence is not disagreement: no record, a record with no decoded
+ * prolog (chained, an op this reader refuses), or no `stack.ts` extent all
+ * answer `true`, and the pass runs on whatever evidence remains — which on x86,
+ * where there is no `.pdata`, is always `stack.ts` alone. The record is the one
+ * `funcPrologRecord` selects, applied on both sides of the worker boundary
+ * exactly as `funcExceptionRecord` is, so the browser and the harness see one
+ * answer.
+ */
+export function prologueAgrees(
+  func: DisasmFunction,
+  frame: StackFrame | null,
+  rf: RuntimeFunction | undefined,
+): boolean {
+  const prolog = rf?.x64Prolog;
+  if (!prolog || !frame) return true;
+  const prologueEnd = frame.prologueEnd ?? null;
+  if (prologueEnd === null) return true;
+  if (func.address + prolog.prologSize < prologueEnd) return false;
+  // `?? null` for `frameDelta`'s reason: the shape crosses a worker boundary,
+  // so a missing field must read as "not said" and not as "allocates nothing".
+  const alloc = frame.prologueAlloc ?? null;
+  if (alloc !== null && prolog.allocBytes !== alloc) return false;
+  return true;
 }
 
 /** The note a label gets when `buildCFG` found no edge into its block. */
